@@ -43,12 +43,16 @@ Dans Pi :
 /gateway setup
 ```
 Wizard qui demande :
-- Token du bot Discord (optionnel)
+- Token du bot Discord (optionnel — appuyer Entrée garde le précédent)
 - Mode d'écoute Discord (`dm`, `mention`, `all`, `channels`)
-- **IDs utilisateurs Discord autorisés** (obligatoire si Discord est activé)
+- **IDs utilisateurs Discord autorisés** (obligatoire si Discord activé — appuyer Entrée garde les précédents)
+- IDs de salons Discord autorisés (optionnel, pour le mode `channels`)
 - Activer WhatsApp (oui/non)
-- **Numéros de téléphone WhatsApp autorisés** (obligatoire si WhatsApp est activé)
-- Taille max de l'historique par canal (optionnel, défaut illimité dans la session)
+- **Numéros de téléphone WhatsApp autorisés** (obligatoire si WhatsApp activé — appuyer Entrée garde les précédents)
+- Nom de session WhatsApp (défaut: `thetis-gateway`)
+- Taille max de l'historique par canal (défaut: `100`)
+
+> 💡 **Conseil** : appuyez simplement sur **Entrée** pour conserver la valeur actuelle d'un champ.
 
 La config est sauvegardée dans `~/.pi/agent/extensions/thetis-gateway/config.json`.
 

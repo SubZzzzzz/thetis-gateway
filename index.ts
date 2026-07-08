@@ -713,33 +713,66 @@ async function runGatewayCommand(
         error: true,
       };
     }
-    const discordToken = await ctx.ui.input(
-      "Discord bot token (leave empty to skip Discord):",
-      config.discord?.token || process.env.DISCORD_BOT_TOKEN || ""
+    const prevDiscordToken = config.discord?.token || process.env.DISCORD_BOT_TOKEN || "";
+    const discordTokenRaw = await ctx.ui.input(
+      "Discord bot token (leave empty to keep previous / skip Discord):",
+      prevDiscordToken
     );
-    const discordMode = await ctx.ui.input(
-      "Discord mode (dm / mention / all / channels):",
-      config.discord?.mode ?? "mention"
+    const discordToken = discordTokenRaw.trim() || prevDiscordToken;
+
+    const prevDiscordMode = config.discord?.mode ?? "mention";
+    const discordModeRaw = await ctx.ui.input(
+      `Discord mode (dm / mention / all / channels) [${prevDiscordMode}]:`,
+      prevDiscordMode
     );
-    const discordUserIds = await ctx.ui.input(
-      "Authorized Discord user IDs (comma-separated, REQUIRED if Discord is enabled):",
-      config.discord?.allowedUserIds?.join(", ") || ""
+    const discordMode = discordModeRaw.trim() || prevDiscordMode;
+
+    const prevDiscordUserIds = config.discord?.allowedUserIds?.join(", ") || "";
+    const discordUserIdsRaw = await ctx.ui.input(
+      "Authorized Discord user IDs (comma-separated, REQUIRED if Discord enabled):",
+      prevDiscordUserIds
     );
+    const discordUserIds = discordUserIdsRaw.trim() || prevDiscordUserIds;
+
+    const prevDiscordChannels = config.discord?.allowedChannelIds?.join(", ") || "";
+    const discordChannelsRaw = await ctx.ui.input(
+      "Allowed Discord channel IDs (comma-separated, optional):",
+      prevDiscordChannels
+    );
+    const discordChannels = discordChannelsRaw.trim() || prevDiscordChannels;
+
+    const prevWhatsappEnabled = config.whatsapp?.enabled ?? true;
     const whatsappEnabled = await ctx.ui.confirm(
       "Enable WhatsApp gateway?",
-      config.whatsapp?.enabled ?? true
+      prevWhatsappEnabled
     );
-    const whatsappPhones = await ctx.ui.input(
-      "Authorized WhatsApp phone numbers (comma-separated, REQUIRED if WhatsApp is enabled):",
-      config.whatsapp?.allowedPhoneNumbers?.join(", ") || ""
+
+    const prevWhatsappPhones = config.whatsapp?.allowedPhoneNumbers?.join(", ") || "";
+    const whatsappPhonesRaw = await ctx.ui.input(
+      "Authorized WhatsApp phone numbers (comma-separated, REQUIRED if WhatsApp enabled):",
+      prevWhatsappPhones
     );
-    const maxHistory = await ctx.ui.input(
-      "Max messages per thread history (default 100):",
-      String(config.maxHistoryPerThread ?? 100)
+    const whatsappPhones = whatsappPhonesRaw.trim() || prevWhatsappPhones;
+
+    const prevSessionName = config.whatsapp?.sessionName ?? "thetis-gateway";
+    const sessionNameRaw = await ctx.ui.input(
+      `WhatsApp session name [${prevSessionName}]:`,
+      prevSessionName
     );
+    const sessionName = sessionNameRaw.trim() || prevSessionName;
+
+    const prevMaxHistory = String(config.maxHistoryPerThread ?? 100);
+    const maxHistoryRaw = await ctx.ui.input(
+      "Max messages per thread history [100]:",
+      prevMaxHistory
+    );
+    const maxHistory = maxHistoryRaw.trim() || prevMaxHistory;
 
     const parsedDiscordIds = discordUserIds
       ? discordUserIds.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+    const parsedDiscordChannels = discordChannels
+      ? discordChannels.split(",").map((s) => s.trim()).filter(Boolean)
       : [];
     const parsedWhatsappPhones = whatsappPhones
       ? whatsappPhones.split(",").map((s) => s.trim()).filter(Boolean)
@@ -754,21 +787,22 @@ async function runGatewayCommand(
 
     const newConfig: GatewayConfig = {
       autoStart: true,
-      maxHistoryPerThread: parseInt(maxHistory || "100", 10) || 100,
+      maxHistoryPerThread: parseInt(maxHistory, 10) || 100,
       discord: discordToken
         ? {
             enabled: true,
             token: discordToken,
-            mode: ["dm", "mention", "all", "channels"].includes(discordMode ?? "")
+            mode: ["dm", "mention", "all", "channels"].includes(discordMode)
               ? (discordMode as any)
               : "mention",
             allowedUserIds: parsedDiscordIds,
+            allowedChannelIds: parsedDiscordChannels.length ? parsedDiscordChannels : undefined,
           }
         : { enabled: false },
       whatsapp: whatsappEnabled
         ? {
             enabled: true,
-            sessionName: "thetis-gateway",
+            sessionName,
             allowedPhoneNumbers: parsedWhatsappPhones,
           }
         : { enabled: false },
