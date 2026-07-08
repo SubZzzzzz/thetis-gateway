@@ -7,12 +7,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/achiller/thetis-gateway.git"
+    "url": "git+https://github.com/SubZzzzzz/thetis-gateway.git"
   },
   "bugs": {
-    "url": "https://github.com/achiller/thetis-gateway/issues"
+    "url": "https://github.com/SubZzzzzz/thetis-gateway/issues"
   },
-  "homepage": "https://github.com/achiller/thetis-gateway#readme",
+  "homepage": "https://github.com/SubZzzzzz/thetis-gateway#readme",
   "engines": {
     "node": ">=18.0.0"
   },
