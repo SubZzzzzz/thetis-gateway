@@ -1,0 +1,15 @@
+[Unit]
+Description=Pi Coding Agent Gateway (Discord + WhatsApp)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.pi/agent/extensions/thetis-gateway/scripts/pi-rpc-wrapper.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

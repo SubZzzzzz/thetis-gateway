@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Runtime data
+threads/
+*.log
+
+# Auth & secrets
+.baileys_auth_*/
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build / IDE
+*.tsbuildinfo
+.vscode/
+.idea/

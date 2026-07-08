@@ -1,0 +1,33 @@
+{
+  "name": "thetis-gateway",
+  "version": "1.0.0",
+  "description": "Discord & WhatsApp gateway for Pi — relay external messages as TUI input with file upload support",
+  "keywords": ["pi-package", "discord", "whatsapp", "gateway", "bot"],
+  "author": "Achille Robbe",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/achiller/thetis-gateway.git"
+  },
+  "bugs": {
+    "url": "https://github.com/achiller/thetis-gateway/issues"
+  },
+  "homepage": "https://github.com/achiller/thetis-gateway#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.15.3",
+    "@whiskeysockets/baileys": "^6.7.5",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}
