@@ -14,17 +14,25 @@ Extension **indépendante** qui transforme Pi en bot Discord et/ou WhatsApp avec
 
 ## Installation
 
-```bash
-# Copier dans les extensions globales de Pi
-mkdir -p ~/.pi/agent/extensions
-cp -r /chemin/vers/thetis-gateway ~/.pi/agent/extensions/
+Depuis n'importe quel poste de travail avec Pi installé :
 
-# Installer les dépendances Node
-cd ~/.pi/agent/extensions/thetis-gateway
-npm install
+```bash
+# Installation via git (recommandé)
+pi install git:github.com/SubZzzzzz/thetis-gateway@v1.0.0
+
+# Ou temporairement pour tester
+pi -e git:github.com/SubZzzzzz/thetis-gateway@v1.0.0
 ```
 
 Puis relancer Pi ou faire `/reload`.
+
+### Installation manuelle (développement)
+
+```bash
+git clone https://github.com/SubZzzzzz/thetis-gateway.git ~/.pi/agent/extensions/thetis-gateway
+cd ~/.pi/agent/extensions/thetis-gateway
+npm install
+```
 
 ## Configuration rapide
 
