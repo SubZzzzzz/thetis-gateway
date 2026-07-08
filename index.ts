@@ -35,10 +35,12 @@ interface GatewayConfig {
     token?: string;
     mode?: "dm" | "mention" | "all" | "channels";
     allowedChannelIds?: string[];
+    allowedUserIds?: string[];
   };
   whatsapp?: {
     enabled: boolean;
     sessionName?: string;
+    allowedPhoneNumbers?: string[];
   };
   autoStart?: boolean;
   maxHistoryPerThread?: number;
@@ -61,8 +63,42 @@ function saveConfig(cfg: GatewayConfig): void {
 let config: GatewayConfig = loadConfig();
 
 /* ------------------------------------------------------------------ */
+/*  Authorization helpers                                              */
+/* ------------------------------------------------------------------ */
+
+function normalizePhone(phone: string): string {
+  return phone.replace(/\D/g, "");
+}
+
+function isDiscordAuthorized(userId: string): boolean {
+  const allowed = config.discord?.allowedUserIds;
+  if (!allowed || allowed.length === 0) return false;
+  return allowed.includes(userId);
+}
+
+function isWhatsAppAuthorized(jid: string): boolean {
+  const allowed = config.whatsapp?.allowedPhoneNumbers;
+  if (!allowed || allowed.length === 0) return false;
+  const phone = normalizePhone(jid.split("@")[0]);
+  return allowed.some((a) => normalizePhone(a) === phone);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Thread Manager — per-channel conversation isolation                */
 /* ------------------------------------------------------------------ */
+
+function clearAllThreadHistories(): void {
+  if (!fs.existsSync(THREADS_DIR)) return;
+  for (const entry of fs.readdirSync(THREADS_DIR, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith(".json")) {
+      try {
+        fs.unlinkSync(path.join(THREADS_DIR, entry.name));
+      } catch {
+        // ignore cleanup errors
+      }
+    }
+  }
+}
 
 interface ThreadMessage {
   role: "user" | "assistant";
@@ -218,6 +254,7 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
     client.on("messageCreate", async (message: any) => {
       if (message.author.bot) return;
       if (message.author.id === client.user?.id) return;
+      if (!isDiscordAuthorized(message.author.id)) return;
 
       const mode = config.discord!.mode ?? "mention";
       let shouldProcess = false;
@@ -379,6 +416,7 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
       if (!msg || !msg.message || msg.key.fromMe) return;
 
       const jid = msg.key.remoteJid;
+      if (!isWhatsAppAuthorized(jid)) return;
       let text =
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
@@ -683,14 +721,36 @@ async function runGatewayCommand(
       "Discord mode (dm / mention / all / channels):",
       config.discord?.mode ?? "mention"
     );
+    const discordUserIds = await ctx.ui.input(
+      "Authorized Discord user IDs (comma-separated, REQUIRED if Discord is enabled):",
+      config.discord?.allowedUserIds?.join(", ") || ""
+    );
     const whatsappEnabled = await ctx.ui.confirm(
       "Enable WhatsApp gateway?",
       config.whatsapp?.enabled ?? true
+    );
+    const whatsappPhones = await ctx.ui.input(
+      "Authorized WhatsApp phone numbers (comma-separated, REQUIRED if WhatsApp is enabled):",
+      config.whatsapp?.allowedPhoneNumbers?.join(", ") || ""
     );
     const maxHistory = await ctx.ui.input(
       "Max messages per thread history (default 100):",
       String(config.maxHistoryPerThread ?? 100)
     );
+
+    const parsedDiscordIds = discordUserIds
+      ? discordUserIds.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+    const parsedWhatsappPhones = whatsappPhones
+      ? whatsappPhones.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+
+    if (discordToken && parsedDiscordIds.length === 0) {
+      return { text: "Discord is enabled but no authorized user IDs were provided. Setup aborted.", error: true };
+    }
+    if (whatsappEnabled && parsedWhatsappPhones.length === 0) {
+      return { text: "WhatsApp is enabled but no authorized phone numbers were provided. Setup aborted.", error: true };
+    }
 
     const newConfig: GatewayConfig = {
       autoStart: true,
@@ -702,9 +762,16 @@ async function runGatewayCommand(
             mode: ["dm", "mention", "all", "channels"].includes(discordMode ?? "")
               ? (discordMode as any)
               : "mention",
+            allowedUserIds: parsedDiscordIds,
           }
         : { enabled: false },
-      whatsapp: { enabled: whatsappEnabled, sessionName: "thetis-gateway" },
+      whatsapp: whatsappEnabled
+        ? {
+            enabled: true,
+            sessionName: "thetis-gateway",
+            allowedPhoneNumbers: parsedWhatsappPhones,
+          }
+        : { enabled: false },
     };
 
     saveConfig(newConfig);
@@ -879,6 +946,7 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
     activeCtx = ctx;
     threads.clear();
     currentThreadId = null;
+    clearAllThreadHistories(); // reset gateway threads on every new Pi session
 
     if (config.autoStart) {
       if (config.discord?.enabled) await startDiscord(pi, ctx);

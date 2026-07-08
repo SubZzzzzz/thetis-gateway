@@ -7,7 +7,7 @@ Extension **indépendante** qui transforme Pi en bot Discord et/ou WhatsApp avec
 - **Conversations par canal** — chaque salon Discord / chat WhatsApp a son propre historique isolé, plus de collision entre utilisateurs
 - **Images** — les images envoyées sur Discord ou WhatsApp sont transmises à Pi pour analyse ; les images générées par Pi sont renvoyées
 - **Actions visibles en temps réel** — quand Pi exécute un outil (`bash`, `read`, `edit`, etc.), l'action et son résultat apparaissent immédiatement sur Discord/WhatsApp (comme dans le TUI)
-- **Historique persistant** — l'historique de chaque canal est sauvegardé et restauré entre les sessions
+- **Historique reset par session** — l'historique de chaque canal est vidé automatiquement à chaque nouvelle session Pi. Plus de mélange entre les sessions précédentes.
 - **File d'attente** — si Pi est occupé, les messages sont mis en file d'attente par canal sans perte
 - **Priorité TUI** — dès que vous tapez dans le terminal Pi, les réponses restent dans le TUI
 - **Démarrage au boot** — service systemd user pour lancer Pi + gateway automatiquement au démarrage du système
@@ -45,8 +45,10 @@ Dans Pi :
 Wizard qui demande :
 - Token du bot Discord (optionnel)
 - Mode d'écoute Discord (`dm`, `mention`, `all`, `channels`)
+- **IDs utilisateurs Discord autorisés** (obligatoire si Discord est activé)
 - Activer WhatsApp (oui/non)
-- Taille max de l'historique par canal (défaut 100)
+- **Numéros de téléphone WhatsApp autorisés** (obligatoire si WhatsApp est activé)
+- Taille max de l'historique par canal (optionnel, défaut illimité dans la session)
 
 La config est sauvegardée dans `~/.pi/agent/extensions/thetis-gateway/config.json`.
 
@@ -57,21 +59,29 @@ Créer `~/.pi/agent/extensions/thetis-gateway/config.json` :
 ```json
 {
   "autoStart": true,
-  "maxHistoryPerThread": 100,
   "discord": {
     "enabled": true,
     "token": "YOUR_BOT_TOKEN",
     "mode": "mention",
-    "allowedChannelIds": []
+    "allowedChannelIds": [],
+    "allowedUserIds": ["YOUR_DISCORD_USER_ID"]
   },
   "whatsapp": {
     "enabled": true,
-    "sessionName": "thetis-gateway"
+    "sessionName": "thetis-gateway",
+    "allowedPhoneNumbers": ["33612345678"]
   }
 }
 ```
 
+> **Sécurité obligatoire** : si une plateforme est activée (`enabled: true`), vous **devez** renseigner au moins un utilisateur autorisé. Sans cela, **aucun utilisateur** ne pourra interagir avec le bot sur cette plateforme.
+
 **Token Discord** — peut aussi être passé par la variable d'environnement `DISCORD_BOT_TOKEN`.
+
+**Autorisation** :
+- **Discord** : par `userId` (champ `allowedUserIds`). Trouvez votre ID dans Discord (Mode développeur → clic droit sur votre nom → Copier l'identifiant).
+- **WhatsApp** : par numéro de téléphone international (champ `allowedPhoneNumbers`), ex: `33612345678` (sans le `+`).
+- Si la liste est vide pour une plateforme activée, tous les messages sont silencieusement ignorés.
 
 ## Démarrage
 
