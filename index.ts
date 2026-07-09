@@ -1295,13 +1295,15 @@ async function runGatewayCommand(
   }
 
   if (sub === "restart") {
-    try {
-      const { exec } = await import("node:child_process");
-      exec("systemctl --user restart thetis-gateway");
-      return { text: "🔄 Redémarrage du service thetis-gateway demandé." };
-    } catch {
-      return { text: "❌ Échec du redémarrage. Vérifiez que le service est installé (`/gateway-boot install`).", error: true };
+    const target = parts[1]?.toLowerCase();
+    // Soft restart: reconnect Discord/WhatsApp without killing the Pi session
+    if (ctx) {
+      if (!target || target === "discord") { await stopDiscord(ctx); await startDiscord(pi, ctx); }
+      if (!target || target === "whatsapp") { await stopWhatsApp(ctx); await startWhatsApp(pi, ctx); }
     }
+    const d = isDiscordReady() ? "🟢" : (runtimeState.discord.fatalError ? "⛔" : "🔴");
+    const w = isWhatsAppReady() ? "🟢" : (runtimeState.whatsapp.fatalError ? "⛔" : "🔴");
+    return { text: `🔄 Gateway reconnecté.\nDiscord: ${d} | WhatsApp: ${w}` };
   }
 
   if (sub === "status") {
