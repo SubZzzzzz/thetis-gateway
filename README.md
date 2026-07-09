@@ -11,17 +11,17 @@ Extension **indépendante** qui transforme Pi en bot Discord et/ou WhatsApp avec
 - **File d'attente** — si Pi est occupé, les messages sont mis en file d'attente par canal sans perte
 - **Priorité TUI** — dès que vous tapez dans le terminal Pi, les réponses restent dans le TUI
 - **Démarrage au boot** — service systemd user pour lancer Pi + gateway automatiquement au démarrage du système
+- **Questions interactives** — support natif du tool `gateway_question` avec boutons Discord et listes WhatsApp
+- **Confirmation memory cross-extension** — quand `thetis-memory` demande une confirmation pour une action sensible (suppression, déplacement, réorganisation), le gateway affiche des boutons Discord ou un menu WhatsApp interactif
 
 ## Installation
 
-Depuis n'importe quel poste de travail avec Pi installé :
-
 ```bash
-# Installation via git (recommandé)
-pi install git:github.com/SubZzzzzz/thetis-gateway@v1.0.0
+# Installation via pi (recommandé)
+pi install git:github.com/SubZzzzzz/thetis-gateway
 
 # Ou temporairement pour tester
-pi -e git:github.com/SubZzzzzz/thetis-gateway@v1.0.0
+pi -e git:github.com/SubZzzzzz/thetis-gateway
 ```
 
 Puis relancer Pi ou faire `/reload`.
@@ -42,13 +42,14 @@ Dans Pi :
 ```
 /gateway setup
 ```
+
 Wizard qui demande :
 - Token du bot Discord (optionnel — appuyer Entrée garde le précédent)
 - Mode d'écoute Discord (`dm`, `mention`, `all`, `channels`)
-- **IDs utilisateurs Discord autorisés** (obligatoire si Discord activé — appuyer Entrée garde les précédents)
+- **IDs utilisateurs Discord autorisés** (obligatoire si Discord activé)
 - IDs de salons Discord autorisés (optionnel, pour le mode `channels`)
 - Activer WhatsApp (oui/non)
-- **Numéros de téléphone WhatsApp autorisés** (obligatoire si WhatsApp activé — appuyer Entrée garde les précédents)
+- **Numéros de téléphone WhatsApp autorisés** (obligatoire si WhatsApp activé)
 - Nom de session WhatsApp (défaut: `thetis-gateway`)
 - Taille max de l'historique par canal (défaut: `100`)
 
@@ -209,6 +210,14 @@ drwxrwxr-x  2 ubuntu ubuntu 4096 Jul  8 19:15 .
 
 Cela fonctionne pour **tous les outils** : `read`, `write`, `edit`, `bash`, `memory`, `learn_wizard`, etc.
 
+### Questions interactives (`gateway_question`)
+
+Quand Pi pose une question avec des options prédéfinies :
+- **Discord** : sondage avec boutons interactifs (max 25 options + bouton "Autres...")
+- **WhatsApp** : message liste avec les options + "Autres..."
+
+L'utilisateur sélectionne une option ou écrit une réponse personnalisée. La réponse est relayée immédiatement à Pi.
+
 ### Fichiers & Images
 
 - **Discord → Pi** : toutes les pièces jointes sont envoyées à Pi
@@ -244,7 +253,10 @@ Dès que vous écrivez dans le terminal Pi :
 
 ## Intégration Thetis Memory
 
-Si `thetis-memory` est installé, les outils `memory` et `learn_wizard` fonctionnent normalement à travers le gateway. Les résultats des outils sont relayés au canal actif comme n'importe quel autre outil.
+Si `thetis-memory` est installé :
+- Les outils `memory` et `learn_wizard` fonctionnent normalement à travers le gateway
+- Les résultats des outils sont relayés au canal actif comme n'importe quel autre outil
+- **Les actions sensibles** (`memory/delete`, `memory/move`, `memory/reorganize`) déclenchent une confirmation interactive via le gateway : boutons Discord ou menu WhatsApp
 
 ## Architecture
 
@@ -304,3 +316,7 @@ thetis-gateway/
 │   └── install-boot.sh    # Installation systemd
 └── threads/              # Historique des conversations (auto)
 ```
+
+## Licence
+
+MIT — © Achille Robbe
