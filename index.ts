@@ -34,8 +34,6 @@ interface GatewayConfig {
   discord?: {
     enabled: boolean;
     token?: string;
-    mode?: "dm" | "mention" | "all" | "channels";
-    allowedChannelIds?: string[];
     allowedUserIds?: string[];
   };
   whatsapp?: {
@@ -112,6 +110,7 @@ interface ThreadMessage {
 interface ChannelThread {
   platform: "discord" | "whatsapp";
   channelId: string;
+  replyJid?: string;
   messages: ThreadMessage[];
   pendingQueue: { text: string; images?: any[] }[];
   processing: boolean;
@@ -278,7 +277,7 @@ async function disableDiscordMemoryButtons(channelId: string, messageId: string)
 async function sendWhatsAppMemoryConfirmation(jid: string, question: string): Promise<void> {
   if (!isWhatsAppReady()) return;
 
-  await whatsappSock.sendMessage(jid, {
+  const sent = await whatsappSock.sendMessage(jid, {
     text: `🛡️ ${question}`,
     footer: "Memory vault confirmation",
     title: "Confirm action",
@@ -291,6 +290,7 @@ async function sendWhatsAppMemoryConfirmation(jid: string, question: string): Pr
       ],
     }],
   }).catch(() => null);
+  if (sent?.key?.id) trackSentWhatsAppId(sent.key.id);
 }
 
 // Exposed to thetis-memory extension (same Node process)
@@ -416,13 +416,14 @@ async function sendWhatsAppPoll(jid: string, question: string, options: string[]
     rowId: "gateway_q_other",
   });
 
-  await whatsappSock.sendMessage(jid, {
+  const sent = await whatsappSock.sendMessage(jid, {
     text: `🗳️ ${question}`,
     footer: "Sélectionnez une option ci-dessous",
     title: "Sondage",
     buttonText: "Voir les options",
     sections: [{ title: "Options disponibles", rows }],
   }).catch(() => null);
+  if (sent?.key?.id) trackSentWhatsAppId(sent.key.id);
 }
 
 function checkQuestionResponse(threadId: string, text: string): { handled: boolean; consume: boolean } {
@@ -741,16 +742,7 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
       if (message.author.bot) return;
       if (message.author.id === client.user?.id) return;
       if (!isDiscordAuthorized(message.author.id)) return;
-
-      const mode = config.discord!.mode ?? "mention";
-      let shouldProcess = false;
-
-      if (mode === "dm" && message.channel.isDMBased?.()) shouldProcess = true;
-      else if (mode === "mention" && message.mentions?.has(client.user!.id)) shouldProcess = true;
-      else if (mode === "all") shouldProcess = true;
-      else if (config.discord!.allowedChannelIds?.includes(message.channel.id)) shouldProcess = true;
-
-      if (!shouldProcess) return;
+      if (!message.channel.isDMBased?.()) return;
 
       // Acknowledge with eye reaction
       try { await message.react("👁"); } catch {}
@@ -832,13 +824,12 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
           name: "gateway",
           description: "Contrôle le gateway Discord/WhatsApp",
           options: [
-            { name: "start", type: 1, description: "Démarrer le gateway", options: [{ name: "target", type: 3, description: "discord ou whatsapp", required: false }] },
-            { name: "stop", type: 1, description: "Arrêter le gateway", options: [{ name: "target", type: 3, description: "discord ou whatsapp", required: false }] },
             { name: "status", type: 1, description: "État des connexions" },
             { name: "threads", type: 1, description: "Lister les conversations actives" },
             { name: "clear", type: 1, description: "Vider l’historique d’un canal", options: [{ name: "id", type: 3, description: "ID du canal (laisser vide pour tout vider)", required: false }] },
             { name: "restart", type: 1, description: "Redémarrer le service gateway" },
             { name: "setup", type: 1, description: "Configurer le gateway (requiert le TUI)" },
+            { name: "pair", type: 1, description: "Appairer WhatsApp par QR code", options: [{ name: "target", type: 3, description: "Plateforme à appairer", required: true, choices: [{ name: "whatsapp", value: "whatsapp" }] }] },
           ],
         },
         {
@@ -860,26 +851,13 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
         // Ignore if slash-command registration fails (e.g. missing scope)
       }
 
-      // Notify allowed channels that the gateway is back online.
-      // Only channels (not DMs) to avoid duplicate messages for users
-      // who are both in allowedUserIds and in an allowed channel.
-      if (restartNotified) return;
       restartNotified = true;
-      const restartMsg = `🔄 **Gateway redémarré**\nLe service Pi est en ligne et prêt.`;
-      try {
-        for (const channelId of config.discord?.allowedChannelIds ?? []) {
-          const channel = await client.channels.fetch(channelId).catch(() => null);
-          if (channel && typeof channel.send === "function") {
-            await channel.send(restartMsg).catch(() => null);
-          }
-        }
-      } catch {
-        // Non-fatal: notification failure should not break startup
-      }
     });
 
     // Handle slash commands and interactive buttons
     client.on("interactionCreate", async (interaction: any) => {
+      if (!isDiscordAuthorized(interaction.user?.id)) return;
+
       // --- Slash commands ---
       if (interaction.isChatInputCommand?.()) {
         const threadId = getThreadId("discord", interaction.channelId);
@@ -1042,12 +1020,41 @@ function isGatewayEnabled(platform: "discord" | "whatsapp"): boolean {
 
 let whatsappSock: any = null;
 
+const sentWhatsAppMessageIds = new Set<string>();
+
+function trackSentWhatsAppId(id: string | undefined | null): void {
+  if (!id) return;
+  if (sentWhatsAppMessageIds.size > 200) {
+    const last100 = Array.from(sentWhatsAppMessageIds).slice(-100);
+    sentWhatsAppMessageIds.clear();
+    last100.forEach((x) => sentWhatsAppMessageIds.add(x));
+  }
+  sentWhatsAppMessageIds.add(id);
+}
+
 function isWhatsAppReady(): boolean {
-  return whatsappSock && whatsappSock.ws?.readyState === 1;
+  // Baileys v7: ws.readyState is undefined, use ws.socket.readyState
+  return whatsappSock && (whatsappSock.ws?.readyState === 1 || whatsappSock.ws?.socket?.readyState === 1);
+}
+
+function hasWhatsAppCredentials(authDir: string): boolean {
+  const credsPath = path.join(authDir, "creds.json");
+  if (!fs.existsSync(credsPath)) return false;
+  try {
+    const creds = JSON.parse(fs.readFileSync(credsPath, "utf8"));
+    // Baileys may not set registered=true after pairing;
+    // only me.id is populated. Accept either flag.
+    return !!((creds.registered || creds.me?.id) && creds.me && creds.me.id);
+  } catch {
+    return false;
+  }
 }
 
 async function sendWhatsAppReply(jid: string, text: string, attachments?: OutgoingAttachment[]): Promise<string | null> {
-  if (!isWhatsAppReady()) return null;
+  if (!isWhatsAppReady()) {
+    console.log("[WA DEBUG sendWhatsAppReply] sock not ready");
+    return null;
+  }
 
   let lastMessageId: string | null = null;
 
@@ -1056,7 +1063,10 @@ async function sendWhatsAppReply(jid: string, text: string, attachments?: Outgoi
       try {
         if (att.contentType.startsWith("image/")) {
           const sent = await whatsappSock.sendMessage(jid, { image: att.data, caption: text });
-          if (sent?.key?.id) lastMessageId = sent.key.id;
+          if (sent?.key?.id) {
+            lastMessageId = sent.key.id;
+            trackSentWhatsAppId(sent.key.id);
+          }
           text = ""; // caption sent with first image only
         } else {
           const sent = await whatsappSock.sendMessage(jid, {
@@ -1065,18 +1075,29 @@ async function sendWhatsAppReply(jid: string, text: string, attachments?: Outgoi
             fileName: att.name,
             caption: text,
           });
-          if (sent?.key?.id) lastMessageId = sent.key.id;
+          if (sent?.key?.id) {
+            lastMessageId = sent.key.id;
+            trackSentWhatsAppId(sent.key.id);
+          }
           text = "";
         }
-      } catch (e) {
-        console.error("WhatsApp attachment failed:", e);
+      } catch (e: any) {
+        console.error("[WA DEBUG sendWhatsAppReply] attachment failed:", e?.message || e);
       }
     }
   }
 
   if (text) {
-    const sent = await whatsappSock.sendMessage(jid, { text }).catch(() => null);
-    if (sent?.key?.id) lastMessageId = sent.key.id;
+    try {
+      const sent = await whatsappSock.sendMessage(jid, { text });
+      if (sent?.key?.id) {
+        lastMessageId = sent.key.id;
+        trackSentWhatsAppId(sent.key.id);
+      }
+      console.log(`[WA DEBUG sendWhatsAppReply] text sent to ${jid} id=${sent?.key?.id}`);
+    } catch (e: any) {
+      console.error(`[WA DEBUG sendWhatsAppReply] text send FAILED to ${jid}:`, e?.message || e);
+    }
   }
   return lastMessageId;
 }
@@ -1087,6 +1108,8 @@ async function deleteWhatsAppMessage(jid: string, messageId: string): Promise<vo
     await whatsappSock.sendMessage(jid, { delete: messageId }).catch(() => null);
   } catch {}
 }
+
+
 
 async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
   if (!isGatewayEnabled("whatsapp")) {
@@ -1100,18 +1123,25 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
   }
 
   try {
-    const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, downloadMediaMessage } =
+    const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, downloadMediaMessage, Browsers } =
       await import("@whiskeysockets/baileys");
-    const { default: qrcode } = await import("qrcode-terminal");
 
     const sessionName = config.whatsapp?.sessionName ?? "thetis-gateway";
     const authDir = path.join(EXT_DIR, `.baileys_auth_${sessionName}`);
+
+    if (!hasWhatsAppCredentials(authDir)) {
+      ctx.ui.notify(
+        "WhatsApp not paired yet. Run /gateway pair whatsapp to pair via QR code.",
+        "warning"
+      );
+      return;
+    }
 
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
     const sock = makeWASocket({
       auth: state,
       printQRInTerminal: false,
-      browser: ["ThetisGateway", "Chrome", "1.0"],
+      browser: Browsers.ubuntu('Chrome'),
     });
     const currentSock = sock; // capture to detect stale events after manual stop
 
@@ -1120,14 +1150,11 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
     sock.ev.on("connection.update", (update: any) => {
       if (whatsappSock !== currentSock) return; // stale socket, ignore
 
-      const { connection, lastDisconnect, qr } = update;
-      if (qr) {
-        ctx.ui.notify("WhatsApp QR printed to terminal — scan with your phone", "info");
-        qrcode.generate(qr, { small: true });
-      }
+      const { connection, lastDisconnect } = update;
       if (connection === "close") {
         const statusCode = lastDisconnect?.error?.outputStatusCode;
         const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+        const errMsg = lastDisconnect?.error?.message || "unknown";
 
         if (isLoggedOut) {
           ctx.ui.notify("WhatsApp logged out — not retrying.", "warning");
@@ -1137,12 +1164,12 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
 
         runtimeState.whatsapp.reconnectAttempts++;
         if (runtimeState.whatsapp.reconnectAttempts > runtimeState.whatsapp.maxReconnectAttempts) {
-          runtimeState.whatsapp.fatalError = `Connection failed after ${runtimeState.whatsapp.maxReconnectAttempts} attempts (${lastDisconnect?.error?.message || "unknown error"})`;
+          runtimeState.whatsapp.fatalError = `Connection failed after ${runtimeState.whatsapp.maxReconnectAttempts} attempts (code ${statusCode}: ${errMsg})`;
           ctx.ui.notify(`WhatsApp fatal error: ${runtimeState.whatsapp.fatalError}`, "error");
           return;
         }
 
-        ctx.ui.notify(`WhatsApp closed (attempt ${runtimeState.whatsapp.reconnectAttempts}/${runtimeState.whatsapp.maxReconnectAttempts}) — will retry in 5s.`, "warning");
+        ctx.ui.notify(`WhatsApp closed (attempt ${runtimeState.whatsapp.reconnectAttempts}/${runtimeState.whatsapp.maxReconnectAttempts}, code ${statusCode}) — retry in 5s.`, "warning");
         setTimeout(() => startWhatsApp(pi, ctx), 5000);
       } else if (connection === "open") {
         runtimeState.whatsapp.reconnectAttempts = 0;
@@ -1152,10 +1179,40 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
 
     sock.ev.on("messages.upsert", async (m: any) => {
       const msg = m.messages[0];
-      if (!msg || !msg.message || msg.key.fromMe) return;
+      if (!msg) {
+        console.log("[WA DEBUG] messages.upsert: empty message");
+        return;
+      }
+      console.log(`[WA DEBUG] raw msg: jid=${msg.key?.remoteJid} fromMe=${msg.key?.fromMe} id=${msg.key?.id} hasMessage=${!!msg.message}`);
+      if (!msg.message) {
+        console.log("[WA DEBUG] no msg.message — skipping");
+        return;
+      }
+
+      // Ignore messages sent by this Baileys instance to avoid loops
+      if (msg.key.fromMe && sentWhatsAppMessageIds.has(msg.key.id)) {
+        console.log("[WA DEBUG] ignoring message sent by this Baileys instance");
+        return;
+      }
+
+      // For fromMe messages from other devices (phone), only allow self-conversation
+      let isSelfConversation = false;
+      if (msg.key.fromMe) {
+        const myPhone = whatsappSock.user?.id?.split("@")[0]?.split(":")[0];
+        const myLid = whatsappSock.user?.lid?.split("@")[0]?.split(":")[0];
+        const remoteId = msg.key.remoteJid?.split("@")[0];
+        console.log(`[WA DEBUG] fromMe check: myPhone=${myPhone} myLid=${myLid} remoteId=${remoteId}`);
+        isSelfConversation = myPhone === remoteId || myLid === remoteId;
+        if (!isSelfConversation) {
+          console.log("[WA DEBUG] fromMe to someone else — skipping");
+          return;
+        }
+      }
 
       const jid = msg.key.remoteJid;
-      if (!isWhatsAppAuthorized(jid)) return;
+      const authorized = isSelfConversation || isWhatsAppAuthorized(jid);
+      console.log(`[WA DEBUG] authorization check: jid=${jid} isSelf=${isSelfConversation} authorized=${authorized}`);
+      if (!authorized) return;
 
       const threadId = getThreadId("whatsapp", jid);
       currentThreadId = threadId; // set EARLY so pi replies can be routed back
@@ -1220,6 +1277,11 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
 
       // Intercept pi slash commands
       const thread = getOrCreateThread("whatsapp", jid);
+      // Ensure we have a usable reply JID (LIDs cannot receive messages)
+      if (!thread.replyJid) {
+        thread.replyJid = resolveWhatsAppReplyJid(jid);
+        console.log(`[WA DEBUG] resolved replyJid for ${jid} -> ${thread.replyJid}`);
+      }
       const piCheck = await handlePiCommand(text, thread, pi);
       if (piCheck.handled) return;
       if (piCheck.passthrough) text = piCheck.passthrough;
@@ -1304,11 +1366,53 @@ async function processThreadQueue(pi: ExtensionAPI, thread: ChannelThread) {
 /*  Reply Routing — assistant -> gateway                               */
 /* ------------------------------------------------------------------ */
 
+function resolveWhatsAppReplyJid(jid: string): string {
+  if (!jid.endsWith("@lid")) return jid;
+  const lid = jid.split("@")[0];
+  const sessionName = config.whatsapp?.sessionName ?? "thetis-gateway";
+  const authDir = path.join(EXT_DIR, `.baileys_auth_${sessionName}`);
+  // 1. Check if this is our own LID (self-conversation) — use plain JID (no device suffix)
+  const myLid = whatsappSock?.user?.lid?.split("@")[0]?.split(":")[0];
+  if (myLid === lid) {
+    const credsPath = path.join(authDir, "creds.json");
+    if (fs.existsSync(credsPath)) {
+      try {
+        const creds = JSON.parse(fs.readFileSync(credsPath, "utf8"));
+        const meId = creds.me?.id;
+        if (meId && typeof meId === "string") {
+          // Strip device suffix: 33786161438:9@s.whatsapp.net → 33786161438@s.whatsapp.net
+          return meId.replace(/:\d+@/, "@");
+        }
+      } catch {}
+    }
+    const plainJid = whatsappSock?.user?.id?.replace(/:\d+@/, "@");
+    if (plainJid) return plainJid;
+  }
+  // 2. For other contacts, read the reverse LID mapping
+  const reverseMap = path.join(authDir, `lid-mapping-${lid}_reverse.json`);
+  if (fs.existsSync(reverseMap)) {
+    try {
+      const phone = JSON.parse(fs.readFileSync(reverseMap, "utf8"));
+      if (phone && typeof phone === "string") return `${phone}@s.whatsapp.net`;
+    } catch {}
+  }
+  return jid;
+}
+
 async function routeAssistantReply(pi: ExtensionAPI, text: string, attachments?: OutgoingAttachment[]) {
-  if (!currentThreadId) return;
+  console.log(`[WA DEBUG routeAssistantReply] currentThreadId=${currentThreadId}`);
+  if (!currentThreadId) {
+    console.log("[WA DEBUG routeAssistantReply] no currentThreadId — aborting");
+    return;
+  }
 
   const thread = threads.get(currentThreadId);
-  if (!thread) return;
+  if (!thread) {
+    console.log(`[WA DEBUG routeAssistantReply] thread not found for ${currentThreadId} — aborting`);
+    return;
+  }
+  const targetJid = thread.replyJid || thread.channelId;
+  console.log(`[WA DEBUG routeAssistantReply] thread=${thread.platform}:${thread.channelId} replyJid=${thread.replyJid} target=${targetJid} text="${text.slice(0,50)}"`);
 
   // Save to thread history
   thread.messages.push({ role: "assistant", text, timestamp: Date.now() });
@@ -1317,7 +1421,9 @@ async function routeAssistantReply(pi: ExtensionAPI, text: string, attachments?:
   if (thread.platform === "discord") {
     await sendDiscordReply(thread.channelId, text, attachments);
   } else if (thread.platform === "whatsapp") {
-    await sendWhatsAppReply(thread.channelId, text, attachments);
+    console.log(`[WA DEBUG routeAssistantReply] calling sendWhatsAppReply(${targetJid}, text.length=${text.length})`);
+    await sendWhatsAppReply(targetJid, text, attachments);
+    console.log(`[WA DEBUG routeAssistantReply] sendWhatsAppReply done`);
   }
 }
 
@@ -1354,7 +1460,10 @@ async function startThinkingIndicator(thread: ChannelThread) {
   if (thread.platform === "whatsapp" && isWhatsAppReady() && !thread.pendingMessageId) {
     try {
       const sent = await whatsappSock.sendMessage(thread.channelId, { text: "💭 Réflexion..." });
-      if (sent?.key?.id) thread.pendingMessageId = sent.key.id;
+      if (sent?.key?.id) {
+        thread.pendingMessageId = sent.key.id;
+        trackSentWhatsAppId(sent.key.id);
+      }
     } catch {}
   }
 }
@@ -1392,6 +1501,250 @@ function extractToolResults(text: string): { toolName: string; result: string }[
 }
 
 /* ------------------------------------------------------------------ */
+/*  WhatsApp QR Pairing                                                */
+/* ------------------------------------------------------------------ */
+
+async function pairWhatsApp(pi: ExtensionAPI, ctx?: ExtensionContext): Promise<CommandResult> {
+  if (!ctx?.hasUI) {
+    return {
+      text: `WhatsApp QR pairing requires the TUI. Please run /gateway pair whatsapp from the terminal.`,
+      error: true,
+    };
+  }
+
+  const sessionName = config.whatsapp?.sessionName ?? "thetis-gateway";
+  const authDir = path.join(EXT_DIR, `.baileys_auth_${sessionName}`);
+
+  // Clear existing auth to force fresh pairing
+  if (fs.existsSync(authDir)) {
+    fs.rmSync(authDir, { recursive: true, force: true });
+  }
+
+  return new Promise(async (resolve) => {
+    let pairingSock: any = null;
+    let socketId = 0;
+    let qrCount = 0;
+    let resolved = false;
+    let timeout: NodeJS.Timeout;
+    let restartAttempts = 0;
+    const MAX_RESTART_ATTEMPTS = 3;
+    let hasOpened = false;
+
+    const cleanup = () => {
+      if (timeout) clearTimeout(timeout);
+      if (pairingSock) {
+        const deadSock = pairingSock;
+        pairingSock = null;
+        try { deadSock.ev.removeAllListeners("creds.update"); } catch {}
+        try { deadSock.ev.removeAllListeners("connection.update"); } catch {}
+        try { deadSock.ws?.socket?.close(); } catch {}
+        try { deadSock.ws?.close(); } catch {}
+        try { deadSock.end(); } catch {}
+      }
+    };
+
+    const resolveOnce = (result: CommandResult) => {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      // Clear the QR widget from TUI
+      try { ctx.ui.setWidget("gateway-qr", []); } catch {}
+      resolve(result);
+    };
+
+    // 3-minute timeout for the whole pairing process
+    timeout = setTimeout(() => {
+      resolveOnce({ text: "⏱️ WhatsApp pairing timed out after 3 minutes. Please try again.", error: true });
+    }, 180_000);
+
+    const startPairing = async () => {
+      // ── 1. Nuke any lingering previous socket  ──
+      if (pairingSock) {
+        const oldSock = pairingSock;
+        pairingSock = null;
+        try { oldSock.ev.removeAllListeners("creds.update"); } catch {}
+        try { oldSock.ev.removeAllListeners("connection.update"); } catch {}
+        try { oldSock.ws?.socket?.terminate(); } catch {}
+        try { oldSock.ws?.close(); } catch {}
+        try { oldSock.end(); } catch {}
+        // Let the TCP stack clean up before we create a new socket
+        await new Promise((r) => setTimeout(r, 800));
+      }
+
+      // ── 2. Peek at the credentials file on disk  ──
+      try {
+        const credsPath = path.join(authDir, "creds.json");
+        if (fs.existsSync(credsPath)) {
+          const raw = fs.readFileSync(credsPath, "utf8");
+          const parsed = JSON.parse(raw);
+          ctx.ui.notify(
+            `[WA] disk creds: me=${parsed.me?.id ? "yes" : "no"} registered=${parsed.registered ? "yes" : "no"} ` +
+            `keys=${Object.keys(parsed).length}`,
+            "info"
+          );
+        } else {
+          ctx.ui.notify(`[WA] disk creds: none (fresh pairing)`, "info");
+        }
+      } catch (e: any) {
+        ctx.ui.notify(`[WA] disk creds read error: ${e.message}`, "warning");
+      }
+
+      try {
+        const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, Browsers } =
+          await import("@whiskeysockets/baileys");
+
+        const { state, saveCreds } = await useMultiFileAuthState(authDir);
+
+        // Log credential state so we know if Baileys loaded partial or full creds
+        ctx.ui.notify(
+          `[WA] socket #${socketId + 1} memory creds: me=${state.creds.me?.id ? "yes" : "no"} registered=${state.creds.registered ? "yes" : "no"}`,
+          "info"
+        );
+
+        // Silence Baileys internal logs so they don't corrupt the TUI display
+        const silentLogger = {
+          info: () => {},
+          error: () => {},
+          debug: () => {},
+          warn: () => {},
+          trace: () => {},
+          child: () => silentLogger,
+          level: "silent",
+        };
+
+        const sock = makeWASocket({
+          auth: state,
+          printQRInTerminal: false,
+          browser: Browsers.ubuntu('Chrome'),
+          logger: silentLogger as any,
+        });
+
+        const thisSocketId = ++socketId;
+        pairingSock = sock;
+
+        sock.ev.on("creds.update", saveCreds);
+
+        sock.ev.on("connection.update", async (update: any) => {
+          // Ignore events from dead sockets (both the old reference check and the ID check)
+          if (pairingSock !== sock || socketId !== thisSocketId) return;
+
+          const { connection, lastDisconnect, qr } = update;
+
+          if (qr) {
+            qrCount++;
+            const qrImagePath = path.join(EXT_DIR, `whatsapp-qr-${qrCount}.png`);
+            // Save QR as image file
+            try {
+              const QRCode = await import("qrcode");
+              await QRCode.default.toFile(qrImagePath, qr, { width: 400, margin: 2 });
+              ctx.ui.notify(
+                `📱 WhatsApp QR code #${qrCount} generated.\n` +
+                `   Scan it with WhatsApp → Settings → Linked Devices → Link a device.\n` +
+                `   Image: ${qrImagePath}`,
+                "info"
+              );
+            } catch (qrErr: any) {
+              ctx.ui.notify(
+                `📱 WhatsApp QR code #${qrCount} (image save failed: ${qrErr.message}).\n` +
+                `   Raw QR string: ${qr}`,
+                "info"
+              );
+            }
+
+            // Render QR as a chat message so it gets full vertical space and isn't truncated
+            try {
+              const QRCode = await import("qrcode");
+              const qrAscii = await QRCode.default.toString(qr, { type: "terminal", small: true });
+              pi.sendMessage(
+                {
+                  customType: "gateway-qr",
+                  content: qrAscii,
+                  display: true,
+                },
+                { triggerTurn: false }
+              );
+            } catch (qrErr: any) {
+              pi.sendMessage(
+                {
+                  customType: "gateway-qr",
+                  content: qr,
+                  display: true,
+                },
+                { triggerTurn: false }
+              );
+            }
+          }
+
+          if (connection === "open") {
+            hasOpened = true;
+            resolveOnce({
+              text: `✅ WhatsApp paired successfully!\nSession: ${sessionName}\nYou can now start the gateway with /gateway restart whatsapp or /gateway-boot start.`,
+            });
+            return;
+          }
+
+          if (connection === "close") {
+            const rawError = lastDisconnect?.error as any;
+            const statusCode = rawError?.output?.statusCode ?? rawError?.statusCode;
+            const errMsg: string = rawError?.message || rawError?.output?.payload?.message || "unknown";
+
+            const isLoggedOut =
+              statusCode === DisconnectReason.loggedOut ||
+              /logged\s*out/i.test(errMsg);
+
+            if (isLoggedOut) {
+              resolveOnce({ text: `❌ WhatsApp pairing failed: logged out.`, error: true });
+              return;
+            }
+
+            // ── Socket death & credential flush ──
+            // Mark this socket dead immediately so late events are ignored
+            const dyingSock = sock;
+            pairingSock = null;
+            try { dyingSock.ev.removeAllListeners("creds.update"); } catch {}
+            try { dyingSock.ev.removeAllListeners("connection.update"); } catch {}
+            try { dyingSock.ws?.socket?.terminate(); } catch {}
+
+            // Force-flush credentials to disk NOW before we recreate the socket
+            try {
+              await saveCreds();
+              ctx.ui.notify(`[WA] credentials flushed to disk after close`, "info");
+            } catch (flushErr: any) {
+              ctx.ui.notify(`[WA] credentials flush error: ${flushErr.message}`, "warning");
+            }
+
+            restartAttempts++;
+            if (restartAttempts > MAX_RESTART_ATTEMPTS) {
+              resolveOnce({ text: `❌ WhatsApp pairing failed: too many reconnection attempts (${MAX_RESTART_ATTEMPTS}).`, error: true });
+              return;
+            }
+
+            ctx.ui.notify(
+              `🔄 WhatsApp reconnecting (attempt ${restartAttempts}/${MAX_RESTART_ATTEMPTS}).\n` +
+              `   Enter your PIN on the phone if asked. A new QR will appear shortly if needed.`,
+              "info"
+            );
+
+            // Wait 4 seconds before reconnecting:
+            //  • saveCreds already flushed above, but give the FS a moment
+            //  • WhatsApp needs a beat to propagate the companion-pairing state
+            setTimeout(() => {
+              if (!resolved) startPairing();
+            }, 4_000);
+            return;
+          }
+        });
+      } catch (err: any) {
+        resolveOnce({ text: `❌ WhatsApp pairing error: ${err.message ?? err}`, error: true });
+      }
+    };
+
+    ctx.ui.notify("🔵 Starting WhatsApp QR pairing… Wait for the QR code to appear.", "info");
+    await startPairing();
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /*  Slash-command helpers (usable from TUI and from gateways)        */
 /* ------------------------------------------------------------------ */
 
@@ -1408,26 +1761,15 @@ async function runGatewayCommand(
   const parts = args.trim().split(/\s+/);
   const sub = parts[0]?.toLowerCase();
 
-  if (sub === "start") {
+  if (sub === "pair") {
     const target = parts[1]?.toLowerCase();
-    // Reset fatal errors on explicit manual start so user can retry after fixing config
-    resetGatewayRuntimeState();
-    if (ctx) {
-      if (!target || target === "discord") await startDiscord(pi, ctx);
-      if (!target || target === "whatsapp") await startWhatsApp(pi, ctx);
+    if (target === "whatsapp") {
+      return await pairWhatsApp(pi, ctx);
     }
-    const d = isDiscordReady() ? "🟢" : (runtimeState.discord.fatalError ? "⛔" : "🔴");
-    const w = isWhatsAppReady() ? "🟢" : (runtimeState.whatsapp.fatalError ? "⛔" : "🔴");
-    return { text: `Starting gateways...\nDiscord: ${d} | WhatsApp: ${w}` };
-  }
-
-  if (sub === "stop") {
-    const target = parts[1]?.toLowerCase();
-    if (ctx) {
-      if (!target || target === "discord") await stopDiscord(ctx);
-      if (!target || target === "whatsapp") await stopWhatsApp(ctx);
+    if (!target) {
+      return { text: `Usage: /gateway pair whatsapp\nStarts QR code pairing for WhatsApp.`, error: true };
     }
-    return { text: "Gateways stopped." };
+    return { text: `Unknown pairing target: ${target}. Available: whatsapp`, error: true };
   }
 
   if (sub === "restart") {
@@ -1492,72 +1834,80 @@ async function runGatewayCommand(
         error: true,
       };
     }
-    const prevDiscordToken = config.discord?.token || process.env.DISCORD_BOT_TOKEN || "";
-    const discordTokenRaw = await ctx.ui.input(
-      "Discord bot token (leave empty to keep previous / skip Discord):",
-      prevDiscordToken
-    );
-    const discordToken = discordTokenRaw.trim() || prevDiscordToken;
 
-    const prevDiscordMode = config.discord?.mode ?? "mention";
-    const discordModeRaw = await ctx.ui.input(
-      `Discord mode (dm / mention / all / channels) [${prevDiscordMode}]:`,
-      prevDiscordMode
+    // ---------- Discord ----------
+    const prevDiscordEnabled = config.discord?.enabled ?? false;
+    const discordEnabled = await ctx.ui.confirm(
+      "Enable Discord gateway?",
+      prevDiscordEnabled
     );
-    const discordMode = discordModeRaw.trim() || prevDiscordMode;
 
-    const prevDiscordUserIds = config.discord?.allowedUserIds?.join(", ") || "";
-    const discordUserIdsRaw = await ctx.ui.input(
-      "Authorized Discord user IDs (comma-separated, REQUIRED if Discord enabled):",
-      prevDiscordUserIds
-    );
-    const discordUserIds = discordUserIdsRaw.trim() || prevDiscordUserIds;
+    let discordToken = "";
+    let discordUserIds = "";
 
-    const prevDiscordChannels = config.discord?.allowedChannelIds?.join(", ") || "";
-    const discordChannelsRaw = await ctx.ui.input(
-      "Allowed Discord channel IDs (comma-separated, optional):",
-      prevDiscordChannels
-    );
-    const discordChannels = discordChannelsRaw.trim() || prevDiscordChannels;
+    if (discordEnabled) {
+      const prevDiscordToken = config.discord?.token || process.env.DISCORD_BOT_TOKEN || "";
+      const discordTokenRaw = await ctx.ui.input(
+        "Discord bot token (leave empty to keep previous):",
+        prevDiscordToken
+      );
+      if (discordTokenRaw === undefined) return { text: "Setup cancelled.", error: true };
+      discordToken = discordTokenRaw.trim() || prevDiscordToken;
 
-    const prevWhatsappEnabled = config.whatsapp?.enabled ?? true;
+      const prevDiscordUserIds = config.discord?.allowedUserIds?.join(", ") || "";
+      const discordUserIdsRaw = await ctx.ui.input(
+        "Authorized Discord user IDs (comma-separated, REQUIRED):",
+        prevDiscordUserIds
+      );
+      if (discordUserIdsRaw === undefined) return { text: "Setup cancelled.", error: true };
+      discordUserIds = discordUserIdsRaw.trim() || prevDiscordUserIds;
+    }
+
+    // ---------- WhatsApp ----------
+    const prevWhatsappEnabled = config.whatsapp?.enabled ?? false;
     const whatsappEnabled = await ctx.ui.confirm(
       "Enable WhatsApp gateway?",
       prevWhatsappEnabled
     );
 
-    const prevWhatsappPhones = config.whatsapp?.allowedPhoneNumbers?.join(", ") || "";
-    const whatsappPhonesRaw = await ctx.ui.input(
-      "Authorized WhatsApp phone numbers (comma-separated, REQUIRED if WhatsApp enabled):",
-      prevWhatsappPhones
-    );
-    const whatsappPhones = whatsappPhonesRaw.trim() || prevWhatsappPhones;
+    let whatsappPhones = "";
+    let sessionName = "thetis-gateway";
 
-    const prevSessionName = config.whatsapp?.sessionName ?? "thetis-gateway";
-    const sessionNameRaw = await ctx.ui.input(
-      `WhatsApp session name [${prevSessionName}]:`,
-      prevSessionName
-    );
-    const sessionName = sessionNameRaw.trim() || prevSessionName;
+    if (whatsappEnabled) {
+      const prevWhatsappPhones = config.whatsapp?.allowedPhoneNumbers?.join(", ") || "";
+      const whatsappPhonesRaw = await ctx.ui.input(
+        "Authorized WhatsApp phone numbers (comma-separated, REQUIRED):",
+        prevWhatsappPhones
+      );
+      if (whatsappPhonesRaw === undefined) return { text: "Setup cancelled.", error: true };
+      whatsappPhones = whatsappPhonesRaw.trim() || prevWhatsappPhones;
 
+      const prevSessionName = config.whatsapp?.sessionName ?? "thetis-gateway";
+      const sessionNameRaw = await ctx.ui.input(
+        `WhatsApp session name [${prevSessionName}]:`,
+        prevSessionName
+      );
+      if (sessionNameRaw === undefined) return { text: "Setup cancelled.", error: true };
+      sessionName = sessionNameRaw.trim() || prevSessionName;
+    }
+
+    // ---------- Global ----------
     const prevMaxHistory = String(config.maxHistoryPerThread ?? 100);
     const maxHistoryRaw = await ctx.ui.input(
       "Max messages per thread history [100]:",
       prevMaxHistory
     );
+    if (maxHistoryRaw === undefined) return { text: "Setup cancelled.", error: true };
     const maxHistory = maxHistoryRaw.trim() || prevMaxHistory;
 
     const parsedDiscordIds = discordUserIds
-      ? discordUserIds.split(",").map((s) => s.trim()).filter(Boolean)
-      : [];
-    const parsedDiscordChannels = discordChannels
-      ? discordChannels.split(",").map((s) => s.trim()).filter(Boolean)
+      ? discordUserIds.split(",").map((s: string) => s.trim()).filter(Boolean)
       : [];
     const parsedWhatsappPhones = whatsappPhones
-      ? whatsappPhones.split(",").map((s) => s.trim()).filter(Boolean)
+      ? whatsappPhones.split(",").map((s: string) => s.trim()).filter(Boolean)
       : [];
 
-    if (discordToken && parsedDiscordIds.length === 0) {
+    if (discordEnabled && discordToken && parsedDiscordIds.length === 0) {
       return { text: "Discord is enabled but no authorized user IDs were provided. Setup aborted.", error: true };
     }
     if (whatsappEnabled && parsedWhatsappPhones.length === 0) {
@@ -1565,17 +1915,13 @@ async function runGatewayCommand(
     }
 
     const newConfig: GatewayConfig = {
-      autoStart: false,
+      autoStart: true,
       maxHistoryPerThread: parseInt(maxHistory, 10) || 100,
-      discord: discordToken
+      discord: discordEnabled && discordToken
         ? {
             enabled: true,
             token: discordToken,
-            mode: ["dm", "mention", "all", "channels"].includes(discordMode)
-              ? (discordMode as any)
-              : "mention",
             allowedUserIds: parsedDiscordIds,
-            allowedChannelIds: parsedDiscordChannels.length ? parsedDiscordChannels : undefined,
           }
         : { enabled: false },
       whatsapp: whatsappEnabled
@@ -1589,12 +1935,15 @@ async function runGatewayCommand(
 
     saveConfig(newConfig);
     config = newConfig;
-    return { text: "Gateway config saved. Use /gateway start to connect." };
+
+
+
+    return { text: "Gateway config saved. Use /gateway-boot start to connect." };
   }
 
   // Unknown sub-command — return help
   return {
-    text: `Usage: /gateway start|stop|restart|status|threads|clear|setup [options]`,
+    text: `Usage: /gateway restart|status|threads|clear|setup|pair`,
     error: true,
   };
 }
@@ -1715,6 +2064,15 @@ function counterKey(threadId: string, toolName: string): string {
 
 export default function thetisGatewayExtension(pi: ExtensionAPI) {
 
+  /* ----  Custom message renderer for QR codes  ---- */
+  pi.registerMessageRenderer("gateway-qr", (message, _options, _theme) => {
+    const lines = (message.content || "").split("\n");
+    return {
+      render: (_width: number) => lines,
+      invalidate: () => {},
+    };
+  });
+
   /* ----  Detect TUI input — disable external relay  ---- */
   pi.on("input", async (event) => {
     if (event.source === "interactive") {
@@ -1770,8 +2128,12 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
 
   /* ----  Capture assistant replies and route them  ---- */
   pi.on("message_end", async (event) => {
+    console.log(`[WA DEBUG message_end] role=${event.message.role} currentThreadId=${currentThreadId}`);
     if (event.message.role !== "assistant") return;
-    if (!currentThreadId) return;
+    if (!currentThreadId) {
+      console.log("[WA DEBUG message_end] currentThreadId is null — skipping");
+      return;
+    }
 
     const content = event.message.content;
     let text = "";
@@ -1816,7 +2178,7 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
     resetGatewayRuntimeState();
 
     // Auto-start gateways only when Pi runs as a service (RPC mode).
-    // In TUI mode the user must start them manually with /gateway start.
+    // In TUI mode the user must start them manually with /gateway-boot start.
     if (config.autoStart && ctx.mode === "rpc") {
       if (isGatewayEnabled("discord")) await startDiscord(pi, ctx);
       if (isGatewayEnabled("whatsapp")) await startWhatsApp(pi, ctx);
@@ -1877,7 +2239,7 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (!currentThreadId) {
         return {
-          content: [{ type: "text", text: "Erreur : aucun thread gateway actif. Connectez-vous via /gateway start." }],
+          content: [{ type: "text", text: "Erreur : aucun thread gateway actif. Connectez-vous via /gateway-boot start." }],
           details: { question: params.question, options: params.options, answer: null, wasCustom: false },
         };
       }
