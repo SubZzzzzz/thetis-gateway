@@ -15,6 +15,7 @@ threads/
 .baileys_auth_*/
 *.pem
 *.key
+config.json
 
 # OS
 .DS_Store

@@ -1146,6 +1146,19 @@ async function processThreadQueue(pi: ExtensionAPI, thread: ChannelThread) {
   while (thread.pendingQueue.length > 0) {
     const item = thread.pendingQueue.shift()!;
 
+    // Interactive confirmation before relaying to Pi
+    if (activeCtx?.hasUI) {
+      const preview = item.text.slice(0, 180) + (item.text.length > 180 ? "…" : "");
+      const ok = await activeCtx.ui.confirm(
+        "Gateway — Incoming message",
+        `Relay from ${thread.platform} to Pi?\n\n${preview}`
+      );
+      if (!ok) {
+        await replyToThread(thread, "⛔ Message refused by user. Not relayed to Pi.");
+        continue;
+      }
+    }
+
     try {
       if (item.images && item.images.length > 0) {
         // Send as content array with images
