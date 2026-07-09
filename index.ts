@@ -117,9 +117,6 @@ interface ChannelThread {
   processing: boolean;
   pendingMessageId?: string;
   typingInterval?: NodeJS.Timeout;
-  confirming: boolean;
-  confirmationQueue: { text: string; images?: any[] }[];
-  confirmationMessageId?: string;
 }
 
 const threads = new Map<string, ChannelThread>();
@@ -144,8 +141,6 @@ function getOrCreateThread(platform: "discord" | "whatsapp", channelId: string):
       messages: loadThreadHistory(id),
       pendingQueue: [],
       processing: false,
-      confirming: false,
-      confirmationQueue: [],
     };
     threads.set(id, thread);
   }
@@ -212,6 +207,67 @@ function resolveQuestion(threadId: string, answer: string, wasCustom: boolean): 
 
 function rejectQuestion(threadId: string, reason: string): void {
   const pending = pendingQuestions.get(threadId);
+  if (!pending) return;
+  clearTimeout(pending.timeout);
+  pendingQuestions.delete(threadId);
+  pending.reject(new Error(reason));
+}
+
+/* ------------------------------------------------------------------ */
+/*  Memory Confirmation (cross-extension)                            */
+/* ------------------------------------------------------------------ */
+
+interface PendingMemoryConfirmation {
+  resolve: (approved: boolean) => void;
+  timeout: NodeJS.Timeout;
+}
+
+const pendingMemoryConfirmations = new Map<string, PendingMemoryConfirmation>();
+
+function resolveMemoryConfirmation(threadId: string, approved: boolean): void {
+  const pending = pendingMemoryConfirmations.get(threadId);
+  if (!pending) return;
+  clearTimeout(pending.timeout);
+  pendingMemoryConfirmations.delete(threadId);
+  pending.resolve(approved);
+}
+
+// Exposed to thetis-memory extension (same Node process)
+(globalThis as any).__gatewayConfirm = async (question: string): Promise<boolean> => {
+  const threadId = currentThreadId;
+  if (!threadId) return false;
+  const thread = threads.get(threadId);
+  if (!thread) return false;
+
+  await replyToThread(thread, `🛡️ **${question}**\nReply with **yes** to confirm or **no** to cancel.`);
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingMemoryConfirmations.delete(threadId);
+      resolve(false);
+    }, 120_000);
+    pendingMemoryConfirmations.set(threadId, { resolve, timeout });
+  });
+};
+
+function checkMemoryConfirmationResponse(threadId: string, text: string): boolean {
+  const pending = pendingMemoryConfirmations.get(threadId);
+  if (!pending) return false;
+
+  const lower = text.trim().toLowerCase();
+  const yesWords = ["oui", "yes", "y", "confirm", "confirmer"];
+  const noWords = ["non", "no", "n", "cancel", "annuler", "refuse", "refuser"];
+
+  if (yesWords.includes(lower)) {
+    resolveMemoryConfirmation(threadId, true);
+    return true;
+  }
+  if (noWords.includes(lower)) {
+    resolveMemoryConfirmation(threadId, false);
+    return true;
+  }
+  return false;
+}
   if (!pending) return;
   clearTimeout(pending.timeout);
   pendingQuestions.delete(threadId);
@@ -666,6 +722,12 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
       const qCheck = checkQuestionResponse(threadId, text);
       if (qCheck.consume) return;
 
+      // Intercept memory confirmation responses before normal routing
+      if (checkMemoryConfirmationResponse(threadId, text)) {
+        await sendDiscordReply(message.channel.id, "📨 Confirmation received.");
+        return;
+      }
+
       // Intercept gateway slash commands
       if (text.startsWith("/gateway") || text.startsWith("/gateway-boot")) {
         currentThreadId = threadId;
@@ -709,13 +771,17 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
         }
       }
 
+      // Show thinking indicator
+      await startThinkingIndicator(thread);
+
       const fullText = (text || "(attachment)") + fileContentText;
+      // Queue the message
+      thread.pendingQueue.push({ text: fullText, images: attachments.length ? attachments : undefined });
       thread.messages.push({ role: "user", text: fullText.slice(0, 200), timestamp: Date.now(), hasImage: attachments.length > 0 });
       saveThreadHistory(getThreadId("discord", message.channel.id), thread.messages);
 
-      // Queue for confirmation before relaying to Pi
-      thread.confirmationQueue.push({ text: fullText, images: attachments.length ? attachments : undefined });
-      await startMessageConfirmation(pi, thread);
+      // Activate this thread and process
+      await processThreadQueue(pi, thread);
     });
 
     // Register slash commands for auto-completion
@@ -809,26 +875,6 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
       // --- Poll button clicks ---
       if (!interaction.isButton()) return;
       const customId: string = interaction.customId;
-
-      // --- Confirmation buttons ---
-      if (customId.startsWith("gateway_confirm:")) {
-        const threadId = getThreadId("discord", interaction.channelId);
-        const thread = threads.get(threadId);
-        if (!thread || !thread.confirming) return;
-
-        const action = customId.split(":")[1];
-        const confirmed = action === "yes";
-
-        await interaction.deferUpdate().catch(() => null);
-        await interaction.followUp({
-          content: confirmed ? "✅ Confirmed — relaying to Pi." : "❌ Refused — message ignored.",
-          ephemeral: true,
-        }).catch(() => null);
-
-        await handleConfirmationResponse(pi, thread, confirmed);
-        return;
-      }
-
       if (!customId.startsWith("gateway_q:")) return;
 
       const threadId = getThreadId("discord", interaction.channelId);
@@ -1059,16 +1105,6 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
       if (listResponse) {
         const selectedRowId = listResponse.singleSelectReply?.selectedRowId;
 
-        // Confirmation responses
-        if (selectedRowId?.startsWith("gateway_confirm_")) {
-          const thread = threads.get(threadId);
-          if (thread && thread.confirming) {
-            const confirmed = selectedRowId === "gateway_confirm_yes";
-            await handleConfirmationResponse(pi, thread, confirmed);
-            return;
-          }
-        }
-
         if (selectedRowId?.startsWith("gateway_q_")) {
           const pending = pendingQuestions.get(threadId);
           if (pending) {
@@ -1096,6 +1132,12 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
       // Intercept pending question responses before normal routing
       const qCheck = checkQuestionResponse(threadId, text);
       if (qCheck.consume) return;
+
+      // Intercept memory confirmation responses before normal routing
+      if (checkMemoryConfirmationResponse(threadId, text)) {
+        await sendWhatsAppReply(jid, "📨 Confirmation received.");
+        return;
+      }
 
       // Intercept gateway slash commands
       if (text.startsWith("/gateway") || text.startsWith("/gateway-boot")) {
@@ -1145,12 +1187,11 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
       }
 
       const fullText = text || "(attachment)";
+      thread.pendingQueue.push({ text: fullText, images: attachments.length ? attachments : undefined });
       thread.messages.push({ role: "user", text: fullText.slice(0, 200), timestamp: Date.now(), hasImage: attachments.length > 0 });
       saveThreadHistory(getThreadId("whatsapp", jid), thread.messages);
 
-      // Queue for confirmation before relaying to Pi
-      thread.confirmationQueue.push({ text: fullText, images: attachments.length ? attachments : undefined });
-      await startMessageConfirmation(pi, thread);
+      await processThreadQueue(pi, thread);
     });
 
     whatsappSock = sock;
@@ -1163,118 +1204,6 @@ async function stopWhatsApp(ctx: ExtensionContext) {
   if (!whatsappSock) return;
   try { await whatsappSock.end(undefined); ctx.ui.notify("WhatsApp disconnected", "info"); } catch {}
   whatsappSock = null;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Message Confirmation (in-gateway)                                  */
-/* ------------------------------------------------------------------ */
-
-async function sendDiscordConfirmation(channelId: string, preview: string): Promise<string | null> {
-  if (!isDiscordReady()) return null;
-  const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = await import("discord.js");
-
-  const embed = new EmbedBuilder()
-    .setTitle("📩 Incoming message")
-    .setDescription(`Relay to Pi?\n\n${preview}`)
-    .setColor(0x5865f2);
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("gateway_confirm:yes").setLabel("✅ Confirm").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId("gateway_confirm:no").setLabel("❌ Refuse").setStyle(ButtonStyle.Danger)
-  );
-
-  const channel = await discordClient.channels.fetch(channelId).catch(() => null);
-  if (!channel) return null;
-  const msg = await channel.send({ embeds: [embed], components: [row] }).catch(() => null);
-  return msg?.id ?? null;
-}
-
-async function disableDiscordConfirmationButtons(channelId: string, messageId: string): Promise<void> {
-  if (!isDiscordReady() || !messageId) return;
-  const { ActionRowBuilder, ButtonBuilder } = await import("discord.js");
-  const channel = await discordClient.channels.fetch(channelId).catch(() => null);
-  if (!channel || typeof channel.messages?.fetch !== "function") return;
-  const msg = await channel.messages.fetch(messageId).catch(() => null);
-  if (!msg || typeof msg.edit !== "function") return;
-  const disabledRows = msg.components?.map((row: any) => {
-    const newRow = new ActionRowBuilder();
-    row.components.forEach((comp: any) => {
-      if (comp.data?.type === 2) {
-        const btn = new ButtonBuilder(comp.data).setDisabled(true);
-        newRow.addComponents(btn);
-      } else {
-        newRow.addComponents(comp);
-      }
-    });
-    return newRow;
-  }) ?? [];
-  await msg.edit({ components: disabledRows }).catch(() => null);
-}
-
-async function sendWhatsAppConfirmation(jid: string, preview: string): Promise<void> {
-  if (!isWhatsAppReady()) return;
-
-  await whatsappSock.sendMessage(jid, {
-    text: `📩 ${preview}`,
-    footer: "Relay this message to Pi?",
-    title: "Incoming Message",
-    buttonText: "Choose",
-    sections: [{
-      title: "Confirm or refuse",
-      rows: [
-        { title: "✅ Confirm", description: "Relay to Pi", rowId: "gateway_confirm_yes" },
-        { title: "❌ Refuse", description: "Ignore this message", rowId: "gateway_confirm_no" },
-      ],
-    }],
-  }).catch(() => null);
-}
-
-async function handleConfirmationResponse(
-  pi: ExtensionAPI,
-  thread: ChannelThread,
-  confirmed: boolean
-): Promise<void> {
-  if (!thread.confirming) return;
-
-  const item = thread.confirmationQueue.shift();
-  if (!item) {
-    thread.confirming = false;
-    return;
-  }
-
-  if (thread.platform === "discord" && thread.confirmationMessageId) {
-    await disableDiscordConfirmationButtons(thread.channelId, thread.confirmationMessageId);
-  }
-  thread.confirmationMessageId = undefined;
-
-  if (confirmed) {
-    thread.pendingQueue.push(item);
-    await processThreadQueue(pi, thread);
-  } else {
-    await replyToThread(thread, "⛔ Message refused by user. Not relayed to Pi.");
-  }
-
-  thread.confirming = false;
-
-  // Process next queued confirmation
-  if (thread.confirmationQueue.length > 0) {
-    await startMessageConfirmation(pi, thread);
-  }
-}
-
-async function startMessageConfirmation(pi: ExtensionAPI, thread: ChannelThread): Promise<void> {
-  if (thread.confirming) return;
-  if (thread.confirmationQueue.length === 0) return;
-
-  thread.confirming = true;
-  const item = thread.confirmationQueue[0];
-  const preview = item.text.slice(0, 120) + (item.text.length > 120 ? "…" : "");
-
-  if (thread.platform === "discord") {
-    thread.confirmationMessageId = await sendDiscordConfirmation(thread.channelId, preview) ?? undefined;
-  } else if (thread.platform === "whatsapp") {
-    await sendWhatsAppConfirmation(thread.channelId, preview);
-  }
 }
 
 /* ------------------------------------------------------------------ */
