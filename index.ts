@@ -220,6 +220,7 @@ function rejectQuestion(threadId: string, reason: string): void {
 interface PendingMemoryConfirmation {
   resolve: (approved: boolean) => void;
   timeout: NodeJS.Timeout;
+  messageId?: string;
 }
 
 const pendingMemoryConfirmations = new Map<string, PendingMemoryConfirmation>();
@@ -232,6 +233,66 @@ function resolveMemoryConfirmation(threadId: string, approved: boolean): void {
   pending.resolve(approved);
 }
 
+async function sendDiscordMemoryConfirmation(channelId: string, question: string): Promise<string | null> {
+  if (!isDiscordReady()) return null;
+  const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = await import("discord.js");
+
+  const embed = new EmbedBuilder()
+    .setTitle("🛡️ Memory vault")
+    .setDescription(question)
+    .setColor(0x5865f2);
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("gateway_mem:yes").setLabel("✅ Confirm").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId("gateway_mem:no").setLabel("❌ Refuse").setStyle(ButtonStyle.Danger)
+  );
+
+  const channel = await discordClient.channels.fetch(channelId).catch(() => null);
+  if (!channel) return null;
+  const msg = await channel.send({ embeds: [embed], components: [row] }).catch(() => null);
+  return msg?.id ?? null;
+}
+
+async function disableDiscordMemoryButtons(channelId: string, messageId: string): Promise<void> {
+  if (!isDiscordReady() || !messageId) return;
+  const { ActionRowBuilder, ButtonBuilder } = await import("discord.js");
+  const channel = await discordClient.channels.fetch(channelId).catch(() => null);
+  if (!channel || typeof channel.messages?.fetch !== "function") return;
+  const msg = await channel.messages.fetch(messageId).catch(() => null);
+  if (!msg || typeof msg.edit !== "function") return;
+  const disabledRows = msg.components?.map((row: any) => {
+    const newRow = new ActionRowBuilder();
+    row.components.forEach((comp: any) => {
+      if (comp.data?.type === 2) {
+        const btn = new ButtonBuilder(comp.data).setDisabled(true);
+        newRow.addComponents(btn);
+      } else {
+        newRow.addComponents(comp);
+      }
+    });
+    return newRow;
+  }) ?? [];
+  await msg.edit({ components: disabledRows }).catch(() => null);
+}
+
+async function sendWhatsAppMemoryConfirmation(jid: string, question: string): Promise<void> {
+  if (!isWhatsAppReady()) return;
+
+  await whatsappSock.sendMessage(jid, {
+    text: `🛡️ ${question}`,
+    footer: "Memory vault confirmation",
+    title: "Confirm action",
+    buttonText: "Choose",
+    sections: [{
+      title: "Confirm or refuse",
+      rows: [
+        { title: "✅ Confirm", description: "Apply the change", rowId: "gateway_mem_yes" },
+        { title: "❌ Refuse", description: "Cancel the change", rowId: "gateway_mem_no" },
+      ],
+    }],
+  }).catch(() => null);
+}
+
 // Exposed to thetis-memory extension (same Node process)
 (globalThis as any).__gatewayConfirm = async (question: string): Promise<boolean> => {
   const threadId = currentThreadId;
@@ -239,40 +300,25 @@ function resolveMemoryConfirmation(threadId: string, approved: boolean): void {
   const thread = threads.get(threadId);
   if (!thread) return false;
 
-  await replyToThread(thread, `🛡️ **${question}**\nReply with **yes** to confirm or **no** to cancel.`);
+  let messageId: string | undefined;
+  if (thread.platform === "discord") {
+    messageId = await sendDiscordMemoryConfirmation(thread.channelId, question) ?? undefined;
+  } else if (thread.platform === "whatsapp") {
+    await sendWhatsAppMemoryConfirmation(thread.channelId, question);
+  }
 
   return new Promise((resolve) => {
     const timeout = setTimeout(() => {
-      pendingMemoryConfirmations.delete(threadId);
+      const p = pendingMemoryConfirmations.get(threadId);
+      if (p) {
+        if (p.messageId) disableDiscordMemoryButtons(thread.channelId, p.messageId);
+        pendingMemoryConfirmations.delete(threadId);
+      }
       resolve(false);
     }, 120_000);
-    pendingMemoryConfirmations.set(threadId, { resolve, timeout });
+    pendingMemoryConfirmations.set(threadId, { resolve, timeout, messageId });
   });
 };
-
-function checkMemoryConfirmationResponse(threadId: string, text: string): boolean {
-  const pending = pendingMemoryConfirmations.get(threadId);
-  if (!pending) return false;
-
-  const lower = text.trim().toLowerCase();
-  const yesWords = ["oui", "yes", "y", "confirm", "confirmer"];
-  const noWords = ["non", "no", "n", "cancel", "annuler", "refuse", "refuser"];
-
-  if (yesWords.includes(lower)) {
-    resolveMemoryConfirmation(threadId, true);
-    return true;
-  }
-  if (noWords.includes(lower)) {
-    resolveMemoryConfirmation(threadId, false);
-    return true;
-  }
-  return false;
-}
-  if (!pending) return;
-  clearTimeout(pending.timeout);
-  pendingQuestions.delete(threadId);
-  pending.reject(new Error(reason));
-}
 
 /* ------------------------------------------------------------------ */
 /*  Discord Poll — interactive buttons                                */
@@ -722,12 +768,6 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
       const qCheck = checkQuestionResponse(threadId, text);
       if (qCheck.consume) return;
 
-      // Intercept memory confirmation responses before normal routing
-      if (checkMemoryConfirmationResponse(threadId, text)) {
-        await sendDiscordReply(message.channel.id, "📨 Confirmation received.");
-        return;
-      }
-
       // Intercept gateway slash commands
       if (text.startsWith("/gateway") || text.startsWith("/gateway-boot")) {
         currentThreadId = threadId;
@@ -869,6 +909,26 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
             interaction.followUp?.({ content: result!.text.slice(0, 2000) }).catch(() => null);
           });
         }
+        return;
+      }
+
+      // --- Memory confirmation buttons ---
+      if (interaction.isButton?.() && interaction.customId?.startsWith("gateway_mem:")) {
+        const threadId = getThreadId("discord", interaction.channelId);
+        const pending = pendingMemoryConfirmations.get(threadId);
+        if (!pending) return;
+
+        const action = interaction.customId.split(":")[1];
+        const approved = action === "yes";
+
+        await interaction.deferUpdate().catch(() => null);
+        await interaction.followUp({
+          content: approved ? "✅ Confirmed — applying change." : "❌ Refused — change cancelled.",
+          ephemeral: true,
+        }).catch(() => null);
+
+        await disableDiscordMemoryButtons(interaction.channelId, pending.messageId ?? "");
+        resolveMemoryConfirmation(threadId, approved);
         return;
       }
 
@@ -1100,10 +1160,21 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
       const threadId = getThreadId("whatsapp", jid);
       currentThreadId = threadId; // set EARLY so pi replies can be routed back
 
-      // Handle interactive list selection (poll / confirmation)
+      // Handle interactive list selection (confirmation / poll)
       const listResponse = msg.message.listResponseMessage;
       if (listResponse) {
         const selectedRowId = listResponse.singleSelectReply?.selectedRowId;
+
+        // Memory confirmation
+        if (selectedRowId?.startsWith("gateway_mem_")) {
+          const pending = pendingMemoryConfirmations.get(threadId);
+          if (pending) {
+            const approved = selectedRowId === "gateway_mem_yes";
+            await sendWhatsAppReply(jid, approved ? "✅ Confirmed — applying change." : "❌ Refused — change cancelled.");
+            resolveMemoryConfirmation(threadId, approved);
+            return;
+          }
+        }
 
         if (selectedRowId?.startsWith("gateway_q_")) {
           const pending = pendingQuestions.get(threadId);
@@ -1132,12 +1203,6 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
       // Intercept pending question responses before normal routing
       const qCheck = checkQuestionResponse(threadId, text);
       if (qCheck.consume) return;
-
-      // Intercept memory confirmation responses before normal routing
-      if (checkMemoryConfirmationResponse(threadId, text)) {
-        await sendWhatsAppReply(jid, "📨 Confirmation received.");
-        return;
-      }
 
       // Intercept gateway slash commands
       if (text.startsWith("/gateway") || text.startsWith("/gateway-boot")) {
