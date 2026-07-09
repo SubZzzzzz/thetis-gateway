@@ -122,6 +122,40 @@ interface ChannelThread {
 const threads = new Map<string, ChannelThread>();
 let currentThreadId: string | null = null;
 let activeCtx: ExtensionContext | null = null;
+
+const fallbackCtx: ExtensionContext = {
+  mode: "rpc",
+  hasUI: false,
+  ui: {
+    notify: () => {},
+    select: async () => undefined,
+    confirm: async () => false,
+    input: async () => undefined,
+    onTerminalInput: () => () => {},
+    setStatus: () => {},
+    setWorkingMessage: () => {},
+    setWorkingIndicator: () => {},
+    setFooter: () => {},
+    setHeader: () => {},
+    setWidget: () => {},
+    setTitle: () => {},
+    setEditorComponent: () => {},
+    setEditorText: () => {},
+    getEditorText: async () => "",
+    getAllThemes: async () => [],
+    getTheme: async () => undefined,
+    setTheme: async () => ({ success: false, error: "No UI" }),
+    pasteToEditor: () => {},
+    custom: async () => undefined,
+    getToolsExpanded: async () => false,
+    setToolsExpanded: () => {},
+  },
+} as unknown as ExtensionContext;
+
+function getGatewayCtx(): ExtensionContext {
+  return activeCtx ?? fallbackCtx;
+}
+
 let lastActiveThreadId: string | null = null;
 let lastActivePlatform: "discord" | "whatsapp" | null = null;
 let lastActiveChannelId: string | null = null;
@@ -817,7 +851,7 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
       const fullText = (text || "(attachment)") + fileContentText;
       // Queue the message
       thread.pendingQueue.push({ text: fullText, images: attachments.length ? attachments : undefined });
-      thread.messages.push({ role: "user", text: fullText.slice(0, 200), timestamp: Date.now(), hasImage: attachments.length > 0 });
+      thread.messages.push({ role: "user", text: fullText.slice(0, 10000), timestamp: Date.now(), hasImage: attachments.length > 0 });
       saveThreadHistory(getThreadId("discord", message.channel.id), thread.messages);
 
       // Activate this thread and process
@@ -965,8 +999,11 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
     });
 
     await client.login(token);
+    if (!client.isReady?.()) {
+      await new Promise<void>((resolve) => client.once("ready", resolve));
+    }
     discordClient = client;
-    ctx.ui.notify(`Discord connected as ${client.user?.tag ?? "bot"}`, "success");
+    ctx.ui.notify(`Discord connected as ${client.user?.tag ?? "bot"}`, "info");
   } catch (err: any) {
     const msg = err.message ?? String(err);
     if (msg.includes("disallowed intents")) {
@@ -982,6 +1019,9 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
           partials: [Partials.Channel, Partials.Message],
         });
         await client.login(token);
+        if (!client.isReady?.()) {
+          await new Promise<void>((resolve) => client.once("ready", resolve));
+        }
         discordClient = client;
         ctx.ui.notify(
           `Discord connected as ${client.user?.tag ?? "bot"} (without MessageContent intent). The bot will not be able to read message text. To fix: enable "Message Content Intent" in the Discord Developer Portal (Bot > Privileged Gateway Intents).`,
@@ -1146,7 +1186,7 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
         setTimeout(() => startWhatsApp(pi, ctx), 5000);
       } else if (connection === "open") {
         runtimeState.whatsapp.reconnectAttempts = 0;
-        ctx.ui.notify("WhatsApp connected", "success");
+        ctx.ui.notify("WhatsApp connected", "info");
       }
     });
 
@@ -1253,7 +1293,7 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
 
       const fullText = text || "(attachment)";
       thread.pendingQueue.push({ text: fullText, images: attachments.length ? attachments : undefined });
-      thread.messages.push({ role: "user", text: fullText.slice(0, 200), timestamp: Date.now(), hasImage: attachments.length > 0 });
+      thread.messages.push({ role: "user", text: fullText.slice(0, 10000), timestamp: Date.now(), hasImage: attachments.length > 0 });
       saveThreadHistory(getThreadId("whatsapp", jid), thread.messages);
 
       await processThreadQueue(pi, thread);
@@ -1403,19 +1443,18 @@ interface CommandResult {
 async function runGatewayCommand(
   args: string,
   pi: ExtensionAPI,
-  ctx?: ExtensionContext
+  _ctx?: ExtensionContext
 ): Promise<CommandResult | null> {
   const parts = args.trim().split(/\s+/);
   const sub = parts[0]?.toLowerCase();
+  const gCtx = getGatewayCtx();
 
   if (sub === "start") {
     const target = parts[1]?.toLowerCase();
     // Reset fatal errors on explicit manual start so user can retry after fixing config
     resetGatewayRuntimeState();
-    if (ctx) {
-      if (!target || target === "discord") await startDiscord(pi, ctx);
-      if (!target || target === "whatsapp") await startWhatsApp(pi, ctx);
-    }
+    if (!target || target === "discord") await startDiscord(pi, gCtx);
+    if (!target || target === "whatsapp") await startWhatsApp(pi, gCtx);
     const d = isDiscordReady() ? "🟢" : (runtimeState.discord.fatalError ? "⛔" : "🔴");
     const w = isWhatsAppReady() ? "🟢" : (runtimeState.whatsapp.fatalError ? "⛔" : "🔴");
     return { text: `Starting gateways...\nDiscord: ${d} | WhatsApp: ${w}` };
@@ -1423,20 +1462,17 @@ async function runGatewayCommand(
 
   if (sub === "stop") {
     const target = parts[1]?.toLowerCase();
-    if (ctx) {
-      if (!target || target === "discord") await stopDiscord(ctx);
-      if (!target || target === "whatsapp") await stopWhatsApp(ctx);
-    }
+    if (!target || target === "discord") await stopDiscord(gCtx);
+    if (!target || target === "whatsapp") await stopWhatsApp(gCtx);
     return { text: "Gateways stopped." };
   }
 
   if (sub === "restart") {
     const target = parts[1]?.toLowerCase();
     // Soft restart: reconnect Discord/WhatsApp without killing the Pi session
-    if (ctx) {
-      if (!target || target === "discord") { await stopDiscord(ctx); await startDiscord(pi, ctx); }
-      if (!target || target === "whatsapp") { await stopWhatsApp(ctx); await startWhatsApp(pi, ctx); }
-    }
+    restartNotified = false;
+    if (!target || target === "discord") { await stopDiscord(gCtx); await startDiscord(pi, gCtx); }
+    if (!target || target === "whatsapp") { await stopWhatsApp(gCtx); await startWhatsApp(pi, gCtx); }
     const d = isDiscordReady() ? "🟢" : (runtimeState.discord.fatalError ? "⛔" : "🔴");
     const w = isWhatsAppReady() ? "🟢" : (runtimeState.whatsapp.fatalError ? "⛔" : "🔴");
     return { text: `🔄 Gateway reconnecté.\nDiscord: ${d} | WhatsApp: ${w}` };
@@ -1486,62 +1522,62 @@ async function runGatewayCommand(
   }
 
   if (sub === "setup") {
-    if (!ctx?.hasUI) {
+    if (!gCtx.hasUI) {
       return {
         text: `Inline setup not supported from gateway.\nUse TUI command /gateway setup, or edit:\n${CONFIG_PATH}`,
         error: true,
       };
     }
     const prevDiscordToken = config.discord?.token || process.env.DISCORD_BOT_TOKEN || "";
-    const discordTokenRaw = await ctx.ui.input(
+    const discordTokenRaw = await gCtx.ui.input(
       "Discord bot token (leave empty to keep previous / skip Discord):",
       prevDiscordToken
     );
     const discordToken = discordTokenRaw.trim() || prevDiscordToken;
 
     const prevDiscordMode = config.discord?.mode ?? "mention";
-    const discordModeRaw = await ctx.ui.input(
+    const discordModeRaw = await gCtx.ui.input(
       `Discord mode (dm / mention / all / channels) [${prevDiscordMode}]:`,
       prevDiscordMode
     );
     const discordMode = discordModeRaw.trim() || prevDiscordMode;
 
     const prevDiscordUserIds = config.discord?.allowedUserIds?.join(", ") || "";
-    const discordUserIdsRaw = await ctx.ui.input(
+    const discordUserIdsRaw = await gCtx.ui.input(
       "Authorized Discord user IDs (comma-separated, REQUIRED if Discord enabled):",
       prevDiscordUserIds
     );
     const discordUserIds = discordUserIdsRaw.trim() || prevDiscordUserIds;
 
     const prevDiscordChannels = config.discord?.allowedChannelIds?.join(", ") || "";
-    const discordChannelsRaw = await ctx.ui.input(
+    const discordChannelsRaw = await gCtx.ui.input(
       "Allowed Discord channel IDs (comma-separated, optional):",
       prevDiscordChannels
     );
     const discordChannels = discordChannelsRaw.trim() || prevDiscordChannels;
 
     const prevWhatsappEnabled = config.whatsapp?.enabled ?? true;
-    const whatsappEnabled = await ctx.ui.confirm(
+    const whatsappEnabled = await gCtx.ui.confirm(
       "Enable WhatsApp gateway?",
       prevWhatsappEnabled
     );
 
     const prevWhatsappPhones = config.whatsapp?.allowedPhoneNumbers?.join(", ") || "";
-    const whatsappPhonesRaw = await ctx.ui.input(
+    const whatsappPhonesRaw = await gCtx.ui.input(
       "Authorized WhatsApp phone numbers (comma-separated, REQUIRED if WhatsApp enabled):",
       prevWhatsappPhones
     );
     const whatsappPhones = whatsappPhonesRaw.trim() || prevWhatsappPhones;
 
     const prevSessionName = config.whatsapp?.sessionName ?? "thetis-gateway";
-    const sessionNameRaw = await ctx.ui.input(
+    const sessionNameRaw = await gCtx.ui.input(
       `WhatsApp session name [${prevSessionName}]:`,
       prevSessionName
     );
     const sessionName = sessionNameRaw.trim() || prevSessionName;
 
     const prevMaxHistory = String(config.maxHistoryPerThread ?? 100);
-    const maxHistoryRaw = await ctx.ui.input(
+    const maxHistoryRaw = await gCtx.ui.input(
       "Max messages per thread history [100]:",
       prevMaxHistory
     );
@@ -1602,15 +1638,16 @@ async function runGatewayCommand(
 async function runGatewayBootCommand(
   args: string,
   _pi?: ExtensionAPI,
-  ctx?: ExtensionContext
+  _ctx?: ExtensionContext
 ): Promise<CommandResult | null> {
   const parts = args.trim().split(/\s+/);
   const sub = parts[0]?.toLowerCase();
   const installScript = path.join(EXT_DIR, "scripts", "install-boot.sh");
   const serviceName = "thetis-gateway";
+  const gCtx = getGatewayCtx();
 
   if (sub === "install" || sub === "enable") {
-    if (!ctx?.hasUI) {
+    if (!gCtx.hasUI) {
       return {
         text: `Run in terminal:\n  bash "${installScript}" install`,
         error: true,
@@ -1626,7 +1663,7 @@ async function runGatewayBootCommand(
   }
 
   if (sub === "remove" || sub === "disable") {
-    if (!ctx?.hasUI) {
+    if (!gCtx.hasUI) {
       return {
         text: `Run in terminal:\n  bash "${installScript}" remove`,
         error: true,
@@ -1672,7 +1709,7 @@ async function runGatewayBootCommand(
   }
 
   if (sub === "linger") {
-    if (!ctx?.hasUI) {
+    if (!gCtx.hasUI) {
       return {
         text: `Run in terminal:\n  loginctl enable-linger $USER`,
         error: true,
@@ -1811,8 +1848,6 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
   /* ----  Session lifecycle  ---- */
   pi.on("session_start", async (_event, ctx) => {
     activeCtx = ctx;
-    threads.clear();
-    currentThreadId = null;
     resetGatewayRuntimeState();
 
     // Auto-start gateways only when Pi runs as a service (RPC mode).
@@ -1858,8 +1893,6 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
     await stopDiscord(ctx);
     await stopWhatsApp(ctx);
     activeCtx = null;
-    currentThreadId = null;
-    threads.clear();
   });
 
   /* ----  Question Tool  ---- */
