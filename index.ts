@@ -1342,11 +1342,7 @@ async function runGatewayCommand(
       return { text: `Thread ${target} cleared.` };
     } else {
       threads.clear();
-      if (fs.existsSync(THREADS_DIR)) {
-        for (const f of fs.readdirSync(THREADS_DIR)) {
-          fs.unlinkSync(path.join(THREADS_DIR, f));
-        }
-      }
+      clearAllThreadHistories();
       return { text: "All threads cleared." };
     }
   }
@@ -1679,7 +1675,6 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
     activeCtx = ctx;
     threads.clear();
     currentThreadId = null;
-    clearAllThreadHistories(); // reset gateway threads on every new Pi session
     resetGatewayRuntimeState();
 
     // Auto-start gateways only when Pi runs as a service (RPC mode).
