@@ -1174,8 +1174,6 @@ async function routeAssistantReply(pi: ExtensionAPI, text: string, attachments?:
   const thread = threads.get(currentThreadId);
   if (!thread) return;
 
-  await stopThinkingIndicator(thread);
-
   // Save to thread history
   thread.messages.push({ role: "assistant", text, timestamp: Date.now() });
   saveThreadHistory(currentThreadId, thread.messages);
@@ -1593,6 +1591,14 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
 
   /* ----  Count tool usage for gateway notifications  ---- */
   pi.on("tool_execution_start", async (event) => {
+    // Relancer le typing indicator sur Discord pendant l'exécution des outils
+    if (currentThreadId) {
+      const thread = threads.get(currentThreadId);
+      if (thread?.platform === "discord") {
+        await startThinkingIndicator(thread);
+      }
+    }
+
     if ((event.toolName === "memory" || event.toolName === "learn_wizard") && currentThreadId) {
       const key = counterKey(currentThreadId, event.toolName);
       let counter = toolCounters.get(key);
@@ -1622,6 +1628,10 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
 
   pi.on("turn_end", async () => {
     toolCounters.clear();
+    if (currentThreadId) {
+      const thread = threads.get(currentThreadId);
+      if (thread) await stopThinkingIndicator(thread);
+    }
   });
 
   /* ----  Capture assistant replies and route them  ---- */
