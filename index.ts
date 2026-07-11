@@ -17,6 +17,10 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+// NOTE: @earendil-works/pi-tui (Container, Text) is imported dynamically
+// below to avoid TypeScript resolution issues — pi's module loader resolves
+// it at runtime, but it's not a direct dependency in the extension's
+// package.json.
 
 /* ------------------------------------------------------------------ */
 /*  Paths                                                              */
@@ -75,11 +79,43 @@ function isDiscordAuthorized(userId: string): boolean {
   return allowed.includes(userId);
 }
 
-function isWhatsAppAuthorized(jid: string): boolean {
+function isWhatsAppAuthorized(jidOrKey: string | { remoteJid?: string; remoteJidAlt?: string; participant?: string; participantAlt?: string }): boolean {
   const allowed = config.whatsapp?.allowedPhoneNumbers;
   if (!allowed || allowed.length === 0) return false;
-  const phone = normalizePhone(jid.split("@")[0]);
-  return allowed.some((a) => normalizePhone(a) === phone);
+  const allowedSet = new Set(allowed.map((a) => normalizePhone(a)));
+
+  // Build a list of candidate identifiers (digits-only) from whichever
+  // format the incoming message uses. Baileys v7 sends messages in
+  // "addressingMode: lid" (new multi-device) with the LID as remoteJid and
+  // the legacy phone-number JID as remoteJidAlt; older clients send the
+  // reverse. We accept the message if ANY of these identifiers matches an
+  // allowed phone number.
+  const candidates = new Set<string>();
+  const collect = (raw?: string) => {
+    if (!raw) return;
+    candidates.add(normalizePhone(raw.split("@")[0]));
+    // For LIDs like "317877915898:11@lid" the part before ":" is opaque and
+    // does not correspond to a phone number — skip it. Only the legacy
+    // s.whatsapp.net JIDs (and group participant JIDs) carry phone numbers.
+    if (raw.includes("@s.whatsapp.net")) {
+      const phone = raw.split("@")[0].split(":")[0];
+      candidates.add(normalizePhone(phone));
+    }
+  };
+
+  if (typeof jidOrKey === "string") {
+    collect(jidOrKey);
+  } else {
+    collect(jidOrKey.remoteJid);
+    collect(jidOrKey.remoteJidAlt);
+    collect(jidOrKey.participant);
+    collect(jidOrKey.participantAlt);
+  }
+
+  for (const candidate of candidates) {
+    if (candidate && allowedSet.has(candidate)) return true;
+  }
+  return false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -159,6 +195,10 @@ let lastActivePlatform: "discord" | "whatsapp" | null = null;
 let lastActiveChannelId: string | null = null;
 let restartNotified = false;
 let isFreshNewSession = false;
+// Track IDs of messages we sent so we can ignore their Baileys echoes
+// (every outgoing sendMessage triggers a messages.upsert with fromMe=true).
+const sentMessageIds = new Set<string>();
+const SENT_ID_TTL_MS = 60_000;
 
 function getThreadId(platform: "discord" | "whatsapp", channelId: string): string {
   return `${platform}:${channelId}`;
@@ -1075,7 +1115,17 @@ function resetWhatsAppAuth(): { deleted: boolean; path: string } {
 let whatsappSock: any = null;
 
 function isWhatsAppReady(): boolean {
-  return whatsappSock && whatsappSock.ws?.readyState === 1;
+  if (!whatsappSock) return false;
+  // Baileys v7 uses a WebSocketClient wrapper exposing `isOpen` (getter),
+  // not `ws.readyState` (the raw WebSocket attribute). Checking the wrong
+  // attribute made isWhatsAppReady() always return false, which silently
+  // dropped every outgoing reply (sendWhatsAppReply returned null with
+  // no error). Fall back to `user` (set only after successful login) if
+  // `isOpen` is missing for any reason.
+  const ws = (whatsappSock as any).ws;
+  if (ws && typeof ws.isOpen === "boolean") return ws.isOpen;
+  if (ws && typeof ws.readyState === "number") return ws.readyState === 1;
+  return !!(whatsappSock as any).user;
 }
 
 async function sendWhatsAppReply(jid: string, text: string, attachments?: OutgoingAttachment[]): Promise<string | null> {
@@ -1108,7 +1158,12 @@ async function sendWhatsAppReply(jid: string, text: string, attachments?: Outgoi
 
   if (text) {
     const sent = await whatsappSock.sendMessage(jid, { text }).catch(() => null);
-    if (sent?.key?.id) lastMessageId = sent.key.id;
+    if (sent?.key?.id) {
+      lastMessageId = sent.key.id;
+      // Track this id so the messages.upsert echo can be ignored.
+      sentMessageIds.add(sent.key.id);
+      setTimeout(() => sentMessageIds.delete(sent.key!.id!), SENT_ID_TTL_MS);
+    }
   }
   return lastMessageId;
 }
@@ -1153,8 +1208,61 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
 
       const { connection, lastDisconnect, qr } = update;
       if (qr) {
-        ctx.ui.notify("WhatsApp QR printed to terminal — scan with your phone", "info");
-        qrcode.generate(qr, { small: true });
+        ctx.ui.notify("WhatsApp QR printed in the TUI — scan with your phone", "info");
+        // Render the QR inside the TUI as a widget above the editor.
+        //
+        // We pass a **factory function** (not a string[]) to setWidget.
+        // pi's setWidget truncates string[] widgets to MAX_WIDGET_LINES = 10
+        // (and appends a "(widget truncated)" notice), which was clipping the
+        // bottom half of the QR. The factory path returns a Container with
+        // one Text per line and is NOT subject to that limit.
+        //
+        // Each Text uses paddingX=0 to avoid wrapping the 35-column QR code
+        // (Text normally word-wraps at the parent's content width; with
+        // paddingX=0 the line is rendered as-is, and the widget area in
+        // practice is the full terminal width which comfortably fits 35 cols).
+        //
+        // We also fix qrcode-terminal's small-mode bug where the bottom
+        // border is emitted without a terminating \n, so we normalize that
+        // here to keep the QR visually consistent.
+        qrcode.generate(qr, { small: true }, (qrString: string) => {
+          const normalized = qrString.endsWith("\n") ? qrString : qrString + "\n";
+          const lines = normalized.split("\n");
+          // Drop the trailing empty element produced by the final "\n" so the
+          // widget doesn't render an extra blank line.
+          if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+          if (ctx.mode === "tui") {
+            (async () => {
+              try {
+                // Dynamic import: @earendil-works/pi-tui is resolved by pi's
+                // module loader at runtime; not declared in package.json to
+                // keep the extension's dependency surface minimal.
+                const { Container, Text } = await import(
+                  "@earendil-works/pi-tui" as string
+                );
+                const container = new Container();
+                for (const line of lines) {
+                  // paddingX=0 / paddingY=0 → render lines verbatim, no wrap,
+                  // no vertical spacing between QR lines.
+                  container.addChild(new Text(line, 0, 0));
+                }
+                ctx.ui.setWidget(
+                  "whatsapp-qr",
+                  () => container,
+                  { placement: "aboveEditor" },
+                );
+              } catch {
+                // If pi-tui can't be resolved for any reason, fall back to
+                // stderr so the user still has a way to scan the QR.
+                process.stderr.write(normalized + "\n");
+              }
+            })();
+          } else {
+            // Non-TUI modes (rpc, print): fall back to plain stderr so the
+            // QR is still visible in the terminal/log.
+            process.stderr.write(normalized + "\n");
+          }
+        });
         // Also deliver the QR as an image to the currently active gateway thread
         // so users on Discord/WhatsApp don't need to look at the terminal.
         const activeThread = currentThreadId ? threads.get(currentThreadId) : null;
@@ -1185,6 +1293,7 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
 
         if (isLoggedOut) {
           ctx.ui.notify("WhatsApp logged out — not retrying.", "warning");
+          if (ctx.mode === "tui") ctx.ui.setWidget("whatsapp-qr", undefined);
           runtimeState.whatsapp.fatalError = "Logged out";
           return;
         }
@@ -1200,16 +1309,39 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
         setTimeout(() => startWhatsApp(pi, ctx), 5000);
       } else if (connection === "open") {
         runtimeState.whatsapp.reconnectAttempts = 0;
+        // Clear the QR widget now that the device is paired.
+        if (ctx.mode === "tui") ctx.ui.setWidget("whatsapp-qr", undefined);
         ctx.ui.notify("WhatsApp connected", "info");
       }
     });
 
     sock.ev.on("messages.upsert", async (m: any) => {
       const msg = m.messages[0];
-      if (!msg || !msg.message || msg.key.fromMe) return;
+      if (!msg || !msg.message) return;
+
+      // Ignore Baileys' echo of messages we just sent (fromMe === true
+      // events that mirror our own sendMessage calls). We track ids in
+      // sentMessageIds; this avoids spurious "rejected unauthorized" logs
+      // and any chance of double-processing our own replies.
+      if (msg.key.fromMe && sentMessageIds.has(msg.key.id)) {
+        return;
+      }
 
       const jid = msg.key.remoteJid;
-      if (!isWhatsAppAuthorized(jid)) return;
+      // Reject messages from non-authorized JIDs (defence in depth: even if a
+      // future bug let through someone else's message, isWhatsAppAuthorized
+      // ensures only the numbers in config.whatsapp.allowedPhoneNumbers can
+      // interact with the bot). This is the ONLY security gate — we accept
+      // self-messages (fromMe === true) so the owner can chat with their own
+      // bot in a self-chat setup.
+      // Pass the whole key (not just remoteJid) so the check can also try
+      // remoteJidAlt / participantAlt: Baileys v7 routes self-messages via
+      // the LID while keeping the legacy phone JID in remoteJidAlt.
+      if (!isWhatsAppAuthorized(msg.key)) {
+        console.log(`[whatsapp-gw] rejected unauthorized jid=${jid} fromMe=${msg.key.fromMe}`);
+        return;
+      }
+      console.log(`[whatsapp-gw] accepted jid=${jid} fromMe=${msg.key.fromMe} type=${m.type}`);
 
       const threadId = getThreadId("whatsapp", jid);
       currentThreadId = threadId; // set EARLY so pi replies can be routed back

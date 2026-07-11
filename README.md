@@ -148,12 +148,31 @@ journalctl --user -u thetis-gateway -f
 
 ## WhatsApp — Authentification
 
-Au premier démarrage, un **QR code** s'affiche dans le terminal. Scannez-le avec l'application WhatsApp de votre téléphone (**Appareils liés → Lier un appareil**). Les credentials sont sauvegardés localement ; vous ne devrez le refaire qu'en cas de déconnexion forcée.
+Au premier démarrage, un **QR code** s'affiche. L'emplacement dépend du mode de Pi :
 
-En mode **boot/RPC**, le QR code apparaît dans les logs systemd :
+| Mode | Emplacement du QR |
+|------|-------------------|
+| **TUI (interactif)** | **Widget au-dessus de l'éditeur** dans le TUI (intégré au render, jamais tronqué) + image PNG envoyée dans le canal actif (Discord/WhatsApp) |
+| **RPC (systemd/boot)** | Logs systemd (stderr) + image PNG envoyée dans le canal actif |
+
+Scannez-le avec l'application WhatsApp de votre téléphone (**Appareils liés → Lier un appareil**). Les credentials sont sauvegardés localement ; vous ne devrez le refaire qu'en cas de déconnexion forcée.
+
+Pour suivre le QR en mode boot :
 ```bash
 journalctl --user -u thetis-gateway -f
 ```
+
+### Self-chat (un seul utilisateur, le owner)
+
+Si le bot est lié à **votre propre compte WhatsApp** et que seul votre numéro est autorisé dans `allowedPhoneNumbers`, vous pouvez discuter avec le bot dans une conversation avec vous-même (« note à soi-même »). C'est le mode recommandé pour un assistant personnel auto-hébergé : personne d'autre ne peut interagir avec le bot.
+
+**Comment ça marche** :
+- Vous envoyez un message → le bot le reçoit, le traite, et vous répond dans la même conversation
+- Le filtre `fromMe` (qui rejette normalement les messages émis par le compte lié) est levé pour permettre le self-chat
+- La sécurité reste garantie par `isWhatsAppAuthorized` qui n'accepte que les JIDs des numéros présents dans `allowedPhoneNumbers`
+- Les **echos** des réponses du bot (Baileys répercute chaque `sendMessage` sortant comme un événement `messages.upsert`) sont filtrés via un Set d'IDs récents (TTL 60s) pour éviter tout double-traitement
+
+Si vous voulez **empêcher** le self-chat et n'accepter que les messages provenant d'autres numéros, gardez le `fromMe` filtre original en place : seul un contact autorisé (autre que vous) pourra déclencher le bot.
 
 ### Gestion du QR code et des credentials
 
@@ -262,6 +281,10 @@ Dès que vous écrivez dans le terminal Pi :
 - `currentThreadId` passe à `null`
 - Les réponses de l'assistant restent dans le TUI
 - Les messages Discord/WhatsApp continuent d'être traités mais leurs réponses sont aussi affichées dans le TUI
+
+### Affichage du QR code dans le TUI
+
+Le QR code WhatsApp s'affiche comme un **widget au-dessus de l'éditeur** dans le TUI. Le widget est implémenté comme un `Container` de pi-tui avec un `Text` par ligne (plutôt qu'un `string[]`) pour contourner la limite `MAX_WIDGET_LINES = 10` de `setWidget` qui tronquait les QR codes de plus de 10 lignes. Le widget est effacé automatiquement dès que la connexion est établie (`connection === "open"`) ou en cas de logged-out.
 
 ### Reconnexion automatique WhatsApp
 
