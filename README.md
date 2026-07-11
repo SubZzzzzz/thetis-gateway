@@ -155,6 +155,17 @@ En mode **boot/RPC**, le QR code apparaît dans les logs systemd :
 journalctl --user -u thetis-gateway -f
 ```
 
+### Gestion du QR code et des credentials
+
+Deux sous-commandes sont disponibles pour gérer le cycle de vie de l'authentification WhatsApp sans avoir à manipuler les fichiers à la main :
+
+| Commande | Description |
+|----------|-------------|
+| `/gateway qr` | (Re)lance la connexion WhatsApp. Si des credentials valides existent, reconnexion automatique. Sinon, un QR code s'affiche dans le terminal **et** est envoyé comme image dans le canal actif (Discord/WhatsApp) pour pouvoir le scanner à distance. |
+| `/gateway reset-whatsapp` (alias: `reset-wa`) | **Destructif** : supprime le dossier de credentials Baileys (`.baileys_auth_<sessionName>`) puis relance la connexion. Force l'affichage d'un nouveau QR. Utile après un *logged out*, pour relier un nouvel appareil, ou pour récupérer un état d'auth corrompu. |
+
+> 💡 Les QR codes sont également **envoyés comme image** dans le canal actif (Discord/WhatsApp) en complément de l'affichage terminal — pratique quand Pi tourne en arrière-plan sur un serveur sans écran.
+
 ## Mode Discord
 
 Le gateway Discord fonctionne **uniquement en messages privés (DM)**. Le bot n'écoute que les conversations privées 1-à-1 avec les utilisateurs autorisés. Aucun message de salon de serveur n'est traité.
@@ -173,6 +184,8 @@ Ces commandes fonctionnent depuis le terminal Pi **et** depuis Discord/WhatsApp.
 | `/gateway start [discord\|whatsapp]` | Démarrer les gateways | ✅ |
 | `/gateway stop [discord\|whatsapp]` | Arrêter les gateways | ✅ |
 | `/gateway restart [discord\|whatsapp]` | Reconnecter Discord/WhatsApp (soft reconnect) | ✅ |
+| `/gateway qr` | (Re)lancer la connexion WhatsApp et afficher un QR code | ✅ |
+| `/gateway reset-whatsapp` | Supprimer les credentials WhatsApp et forcer un nouveau QR | ✅ |
 | `/gateway-boot start` | Démarrer le service systemd | ✅ |
 | `/gateway-boot stop` | Arrêter le service systemd | ✅ |
 | `/gateway-boot status` | Voir l'état du service | ✅ |
@@ -255,8 +268,8 @@ Dès que vous écrivez dans le terminal Pi :
 Si la connexion WhatsApp tombe (réseau instable, serveur temporairement indisponible) :
 - Le gateway retente **3 fois**, espacées de **5 secondes**
 - Au-delà, il passe en **erreur fatale** (visible avec `/gateway status` préfixé par ⛔)
-- Pour réessayer : `/gateway start whatsapp` ou `/gateway restart whatsapp`
-- En cas de **logged out** (session expirée ou déconnectée depuis le téléphone) : pas de retry, il faut rescanner le QR code
+- Pour réessayer : `/gateway start whatsapp`, `/gateway restart whatsapp` ou `/gateway qr`
+- En cas de **logged out** (session expirée ou déconnectée depuis le téléphone) : pas de retry automatique — utilisez `/gateway reset-whatsapp` pour effacer les credentials puis rescanner le QR (ou `/gateway qr` pour forcer un nouveau cycle de connexion si l'état d'auth est encore récupérable)
 
 ### Fallback intents Discord (MessageContent)
 
@@ -314,7 +327,8 @@ En résumé : les commandes qui produisent du texte fonctionnent, celles qui mod
 
 - [`discord.js`](https://discord.js.org/) — bot Discord
 - [`@whiskeysockets/baileys`](https://github.com/WhiskeySockets/Baileys) — client WhatsApp pure Node.js
-- [`qrcode-terminal`](https://github.com/gtanner/qrcode-terminal) — affichage QR WhatsApp
+- [`qrcode-terminal`](https://github.com/gtanner/qrcode-terminal) — affichage QR WhatsApp en terminal
+- [`qrcode`](https://www.npmjs.com/package/qrcode) — génération de l'image PNG du QR envoyée dans le canal actif
 
 ## Fichiers
 

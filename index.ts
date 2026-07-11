@@ -861,6 +861,8 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
             { name: "threads", type: 1, description: "Lister les conversations actives" },
             { name: "clear", type: 1, description: "Vider l’historique d’un canal", options: [{ name: "id", type: 3, description: "ID du canal (laisser vide pour tout vider)", required: false }] },
             { name: "restart", type: 1, description: "Redémarrer le service gateway" },
+            { name: "qr", type: 1, description: "(Re)lancer la connexion WhatsApp et afficher un QR code" },
+            { name: "reset-whatsapp", type: 1, description: "Supprimer les credentials WhatsApp et forcer un nouveau QR" },
             { name: "setup", type: 1, description: "Configurer le gateway (requiert le TUI)" },
           ],
         },
@@ -1052,6 +1054,20 @@ function isGatewayEnabled(platform: "discord" | "whatsapp"): boolean {
   return config.whatsapp?.enabled ?? false;
 }
 
+function getWhatsAppAuthDir(): string {
+  const sessionName = config.whatsapp?.sessionName ?? "thetis-gateway";
+  return path.join(EXT_DIR, `.baileys_auth_${sessionName}`);
+}
+
+function resetWhatsAppAuth(): { deleted: boolean; path: string } {
+  const authDir = getWhatsAppAuthDir();
+  if (fs.existsSync(authDir)) {
+    fs.rmSync(authDir, { recursive: true, force: true });
+    return { deleted: true, path: authDir };
+  }
+  return { deleted: false, path: authDir };
+}
+
 /* ------------------------------------------------------------------ */
 /*  WhatsApp (Baileys)                                                 */
 /* ------------------------------------------------------------------ */
@@ -1120,8 +1136,7 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
       await import("@whiskeysockets/baileys");
     const { default: qrcode } = await import("qrcode-terminal");
 
-    const sessionName = config.whatsapp?.sessionName ?? "thetis-gateway";
-    const authDir = path.join(EXT_DIR, `.baileys_auth_${sessionName}`);
+    const authDir = getWhatsAppAuthDir();
 
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
     const sock = makeWASocket({
@@ -1140,6 +1155,29 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
       if (qr) {
         ctx.ui.notify("WhatsApp QR printed to terminal — scan with your phone", "info");
         qrcode.generate(qr, { small: true });
+        // Also deliver the QR as an image to the currently active gateway thread
+        // so users on Discord/WhatsApp don't need to look at the terminal.
+        const activeThread = currentThreadId ? threads.get(currentThreadId) : null;
+        if (activeThread) {
+          (async () => {
+            try {
+              const { default: QRCode } = await import("qrcode");
+              const buffer = await QRCode.toBuffer(qr, { type: "png", margin: 1, scale: 6 });
+              const caption = "📱 Scannez ce QR code avec WhatsApp (Appareils liés → Lier un appareil)";
+              if (activeThread.platform === "discord") {
+                await sendDiscordReply(activeThread.channelId, caption, [{
+                  name: "whatsapp-qr.png",
+                  data: buffer,
+                  contentType: "image/png",
+                }]);
+              } else if (activeThread.platform === "whatsapp") {
+                await currentSock.sendMessage(activeThread.channelId, { image: buffer, caption }).catch(() => null);
+              }
+            } catch {
+              // Best-effort delivery; terminal QR is the source of truth
+            }
+          })();
+        }
       }
       if (connection === "close") {
         const statusCode = lastDisconnect?.error?.outputStatusCode;
@@ -1454,6 +1492,47 @@ async function runGatewayCommand(
     return { text: `🔄 Gateway reconnecté.\nDiscord: ${d} | WhatsApp: ${w}` };
   }
 
+  if (sub === "qr") {
+    if (!isGatewayEnabled("whatsapp")) {
+      return { text: "⚠️ WhatsApp est désactivé dans la config. Lancez `/gateway setup` pour l'activer.", error: true };
+    }
+    // Force a fresh connection attempt: stop if running, clear fatal-error
+    // state from a previous logged-out / failed session, then start. If valid
+    // creds are present, WhatsApp reconnects silently; otherwise a QR code
+    // is printed to the terminal (and sent as an image to the active thread).
+    if (whatsappSock) await stopWhatsApp(gCtx);
+    runtimeState.whatsapp.fatalError = null;
+    runtimeState.whatsapp.reconnectAttempts = 0;
+    await startWhatsApp(pi, gCtx);
+    return {
+      text:
+        "📱 Connexion WhatsApp en cours…\n" +
+        "• Si des credentials valides existent : reconnexion automatique.\n" +
+        "• Sinon : un QR code va s'afficher dans le terminal (et sera aussi envoyé en image dans ce canal).",
+    };
+  }
+
+  if (sub === "reset-whatsapp" || sub === "reset-wa") {
+    if (!isGatewayEnabled("whatsapp")) {
+      return { text: "⚠️ WhatsApp est désactivé dans la config. Lancez `/gateway setup` pour l'activer.", error: true };
+    }
+    // Destructive: wipe the local Baileys auth folder so the next connection
+    // forces a fresh QR pairing. Useful after a logged-out session, when
+    // switching the linked device, or to recover from a corrupted auth state.
+    if (whatsappSock) await stopWhatsApp(gCtx);
+    const result = resetWhatsAppAuth();
+    runtimeState.whatsapp.fatalError = null;
+    runtimeState.whatsapp.reconnectAttempts = 0;
+    await startWhatsApp(pi, gCtx);
+    return {
+      text:
+        (result.deleted
+          ? `🗑️ Credentials WhatsApp supprimés (\`${result.path}\`).\n`
+          : `ℹ️ Aucun credentials local trouvé — démarrage d'une nouvelle session.\n`) +
+        "📱 Un QR code va s'afficher dans le terminal (et sera aussi envoyé en image dans ce canal). Scannez-le avec WhatsApp pour relier l'appareil.",
+    };
+  }
+
   if (sub === "status") {
     const d = isDiscordReady()
       ? "🟢 connected"
@@ -1585,7 +1664,10 @@ async function runGatewayCommand(
 
   // Unknown sub-command — return help
   return {
-    text: `Usage: /gateway start|stop|restart|status|threads|clear|setup [options]`,
+    text:
+      `Usage: /gateway start|stop|restart|qr|reset-whatsapp|status|threads|clear|setup [options]\n` +
+      `  qr              : (re)lance la connexion WhatsApp (affiche un QR si pas de creds)\n` +
+      `  reset-whatsapp  : supprime les creds WhatsApp et force un nouveau QR`,
     error: true,
   };
 }
