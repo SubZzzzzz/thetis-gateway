@@ -4,10 +4,10 @@ Extension **indépendante** qui transforme Pi en bot Discord et/ou WhatsApp avec
 
 ## Fonctionnalités
 
-- **Conversations par canal** — chaque salon Discord / chat WhatsApp a son propre historique isolé, plus de collision entre utilisateurs
+- **Historique par canal** — chaque salon Discord / chat WhatsApp a son propre historique persistant pour le routage des réponses (voir "Limites" pour le partage du contexte LLM)
 - **Images** — les images envoyées sur Discord ou WhatsApp sont transmises à Pi pour analyse ; les images générées par Pi sont renvoyées
 - **Actions visibles en temps réel** — quand Pi exécute un outil (`bash`, `read`, `edit`, etc.), l'action et son résultat apparaissent immédiatement sur Discord/WhatsApp (comme dans le TUI)
-- **Historique reset par session** — l'historique de chaque canal est vidé automatiquement à chaque nouvelle session Pi. Plus de mélange entre les sessions précédentes.
+- **Historique limité par canal** — chaque canal conserve ses N derniers messages (défaut : 100) en local, persistés entre les sessions. Les commandes `/new` et `/reset` vident l'historique du canal actif.
 - **File d'attente** — si Pi est occupé, les messages sont mis en file d'attente par canal sans perte
 - **Priorité TUI** — dès que vous tapez dans le terminal Pi, les réponses restent dans le TUI
 - **Démarrage au boot** — service systemd user pour lancer Pi + gateway automatiquement au démarrage du système
@@ -45,9 +45,7 @@ Dans Pi :
 
 Wizard qui demande :
 - Token du bot Discord (optionnel — appuyer Entrée garde le précédent)
-- Mode d'écoute Discord (`dm`, `mention`, `all`, `channels`)
 - **IDs utilisateurs Discord autorisés** (obligatoire si Discord activé)
-- IDs de salons Discord autorisés (optionnel, pour le mode `channels`)
 - Activer WhatsApp (oui/non)
 - **Numéros de téléphone WhatsApp autorisés** (obligatoire si WhatsApp activé)
 - Nom de session WhatsApp (défaut: `thetis-gateway`)
@@ -67,8 +65,6 @@ Créer `~/.pi/agent/extensions/thetis-gateway/config.json` :
   "discord": {
     "enabled": true,
     "token": "YOUR_BOT_TOKEN",
-    "mode": "mention",
-    "allowedChannelIds": [],
     "allowedUserIds": ["YOUR_DISCORD_USER_ID"]
   },
   "whatsapp": {
@@ -82,6 +78,13 @@ Créer `~/.pi/agent/extensions/thetis-gateway/config.json` :
 > **Sécurité obligatoire** : si une plateforme est activée (`enabled: true`), vous **devez** renseigner au moins un utilisateur autorisé. Sans cela, **aucun utilisateur** ne pourra interagir avec le bot sur cette plateforme.
 
 **Token Discord** — peut aussi être passé par la variable d'environnement `DISCORD_BOT_TOKEN`.
+
+**Permissions recommandées** (hygiène de base) :
+```bash
+chmod 700 ~/.pi/agent/extensions/thetis-gateway
+chmod 600 ~/.pi/agent/extensions/thetis-gateway/config.json
+```
+Le fichier `config.json` contient le token en clair. Sur une machine mono-utilisateur ce n'est pas critique, mais c'est une bonne hygiène de restreindre sa lecture.
 
 **Autorisation** :
 - **Discord** : par `userId` (champ `allowedUserIds`). Trouvez votre ID dans Discord (Mode développeur → clic droit sur votre nom → Copier l'identifiant).
@@ -152,14 +155,9 @@ En mode **boot/RPC**, le QR code apparaît dans les logs systemd :
 journalctl --user -u thetis-gateway -f
 ```
 
-## Modes Discord
+## Mode Discord
 
-| Mode | Description |
-|------|-------------|
-| `dm` | Répond uniquement en message privé |
-| `mention` | Répond quand le bot est mentionné |
-| `all` | Répond dans tous les salons accessibles |
-| `channels` | Répond uniquement dans les `allowedChannelIds` |
+Le gateway Discord fonctionne **uniquement en messages privés (DM)**. Le bot n'écoute que les conversations privées 1-à-1 avec les utilisateurs autorisés. Aucun message de salon de serveur n'est traité.
 
 ## Commandes
 
@@ -174,6 +172,7 @@ Ces commandes fonctionnent depuis le terminal Pi **et** depuis Discord/WhatsApp.
 | `/gateway clear [id]` | Vider l'historique d'un canal | ✅ |
 | `/gateway start [discord\|whatsapp]` | Démarrer les gateways | ✅ |
 | `/gateway stop [discord\|whatsapp]` | Arrêter les gateways | ✅ |
+| `/gateway restart [discord\|whatsapp]` | Reconnecter Discord/WhatsApp (soft reconnect) | ✅ |
 | `/gateway-boot start` | Démarrer le service systemd | ✅ |
 | `/gateway-boot stop` | Arrêter le service systemd | ✅ |
 | `/gateway-boot status` | Voir l'état du service | ✅ |
@@ -251,6 +250,22 @@ Dès que vous écrivez dans le terminal Pi :
 - Les réponses de l'assistant restent dans le TUI
 - Les messages Discord/WhatsApp continuent d'être traités mais leurs réponses sont aussi affichées dans le TUI
 
+### Reconnexion automatique WhatsApp
+
+Si la connexion WhatsApp tombe (réseau instable, serveur temporairement indisponible) :
+- Le gateway retente **3 fois**, espacées de **5 secondes**
+- Au-delà, il passe en **erreur fatale** (visible avec `/gateway status` préfixé par ⛔)
+- Pour réessayer : `/gateway start whatsapp` ou `/gateway restart whatsapp`
+- En cas de **logged out** (session expirée ou déconnectée depuis le téléphone) : pas de retry, il faut rescanner le QR code
+
+### Fallback intents Discord (MessageContent)
+
+Discord requiert un "privileged intent" pour lire le contenu textuel des messages. Si tu ne l'as pas activé dans le [Developer Portal](https://discord.com/developers/applications) (Bot → Privileged Gateway Intents → Message Content Intent) :
+- Le gateway détecte l'erreur `disallowed intents` et se reconnecte **sans cet intent**
+- Le bot reste en ligne mais **ne peut plus lire le texte des messages** (seulement les embeds, attachments et métadonnées)
+- Une notification s'affiche dans le TUI avec la marche à suivre
+- Recommandé : active l'intent dans le portal puis `/gateway restart discord`
+
 ## Intégration Thetis Memory
 
 Si `thetis-memory` est installé :
@@ -308,13 +323,15 @@ thetis-gateway/
 ├── index.ts              # Extension principale
 ├── package.json          # Dépendances
 ├── README.md             # Documentation
+├── LICENSE               # Licence MIT
+├── .gitignore            # Fichiers ignorés par Git
 ├── .env.example          # Variables d'environnement
 ├── systemd/
 │   └── pi-gateway.service # Définition service systemd
 ├── scripts/
 │   ├── pi-rpc-wrapper.sh  # Wrapper mode RPC
 │   └── install-boot.sh    # Installation systemd
-└── threads/              # Historique des conversations (auto)
+└── threads/              # Historique des conversations (auto, ignoré par Git)
 ```
 
 ## Licence
