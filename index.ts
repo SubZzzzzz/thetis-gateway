@@ -1500,10 +1500,21 @@ async function runGatewayCommand(
     // state from a previous logged-out / failed session, then start. If valid
     // creds are present, WhatsApp reconnects silently; otherwise a QR code
     // is printed to the terminal (and sent as an image to the active thread).
-    if (whatsappSock) await stopWhatsApp(gCtx);
-    runtimeState.whatsapp.fatalError = null;
-    runtimeState.whatsapp.reconnectAttempts = 0;
-    await startWhatsApp(pi, gCtx);
+    // Wrapped in try-catch so any failure in Baileys/QR generation is
+    // surfaced as a command error instead of crashing the Pi process.
+    try {
+      if (whatsappSock) {
+        try { await stopWhatsApp(gCtx); } catch { /* ignore stop errors */ }
+      }
+      runtimeState.whatsapp.fatalError = null;
+      runtimeState.whatsapp.reconnectAttempts = 0;
+      await startWhatsApp(pi, gCtx);
+    } catch (err: any) {
+      return {
+        text: `❌ Échec du démarrage WhatsApp : \`${err?.message ?? err}\``,
+        error: true,
+      };
+    }
     return {
       text:
         "📱 Connexion WhatsApp en cours…\n" +
@@ -1519,11 +1530,21 @@ async function runGatewayCommand(
     // Destructive: wipe the local Baileys auth folder so the next connection
     // forces a fresh QR pairing. Useful after a logged-out session, when
     // switching the linked device, or to recover from a corrupted auth state.
-    if (whatsappSock) await stopWhatsApp(gCtx);
-    const result = resetWhatsAppAuth();
-    runtimeState.whatsapp.fatalError = null;
-    runtimeState.whatsapp.reconnectAttempts = 0;
-    await startWhatsApp(pi, gCtx);
+    let result: { deleted: boolean; path: string };
+    try {
+      if (whatsappSock) {
+        try { await stopWhatsApp(gCtx); } catch { /* ignore stop errors */ }
+      }
+      result = resetWhatsAppAuth();
+      runtimeState.whatsapp.fatalError = null;
+      runtimeState.whatsapp.reconnectAttempts = 0;
+      await startWhatsApp(pi, gCtx);
+    } catch (err: any) {
+      return {
+        text: `❌ Échec du reset WhatsApp : \`${err?.message ?? err}\``,
+        error: true,
+      };
+    }
     return {
       text:
         (result.deleted
@@ -2067,9 +2088,16 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
   pi.registerCommand("gateway", {
     description: "Control the Discord/WhatsApp gateway",
     handler: async (args, ctx) => {
-      const result = await runGatewayCommand(args, pi, ctx);
-      if (result) {
-        ctx.ui.notify(result.text, result.error ? "warning" : "info");
+      try {
+        const result = await runGatewayCommand(args, pi, ctx);
+        if (result) {
+          ctx.ui.notify(result.text, result.error ? "warning" : "info");
+        }
+      } catch (err: any) {
+        // Never let an exception escape the command handler — it would
+        // crash the Pi process (and trigger the "Select a session to
+        // restore" loop on the next start). Surface it as a notification.
+        ctx.ui.notify(`Gateway command error: ${err?.message ?? err}`, "error");
       }
     },
   });
@@ -2078,9 +2106,13 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
   pi.registerCommand("gateway-boot", {
     description: "Configure systemd boot service for the gateway",
     handler: async (args, ctx) => {
-      const result = await runGatewayBootCommand(args, pi, ctx);
-      if (result) {
-        ctx.ui.notify(result.text, result.error ? "warning" : "info");
+      try {
+        const result = await runGatewayBootCommand(args, pi, ctx);
+        if (result) {
+          ctx.ui.notify(result.text, result.error ? "warning" : "info");
+        }
+      } catch (err: any) {
+        ctx.ui.notify(`Gateway-boot command error: ${err?.message ?? err}`, "error");
       }
     },
   });
