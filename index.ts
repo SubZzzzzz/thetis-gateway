@@ -1116,7 +1116,7 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
   }
 
   try {
-    const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, downloadMediaMessage } =
+    const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, downloadMediaMessage, Browsers } =
       await import("@whiskeysockets/baileys");
     const { default: qrcode } = await import("qrcode-terminal");
 
@@ -1127,7 +1127,7 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
     const sock = makeWASocket({
       auth: state,
       printQRInTerminal: false,
-      browser: ["ThetisGateway", "Chrome", "1.0"],
+      browser: Browsers.ubuntu('Chrome'),
     });
     const currentSock = sock; // capture to detect stale events after manual stop
 
