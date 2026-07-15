@@ -366,11 +366,11 @@ async function sendWhatsAppMemoryConfirmation(jid: string, question: string): Pr
 }
 
 // Exposed to thetis-memory extension (same Node process)
-(globalThis as any).__gatewayConfirm = async (question: string): Promise<boolean> => {
+(globalThis as any).__gatewayConfirm = async (question: string): Promise<boolean | null> => {
   const threadId = currentThreadId;
-  if (!threadId) return false;
+  if (!threadId) return null;
   const thread = threads.get(threadId);
-  if (!thread) return false;
+  if (!thread) return null;
 
   let messageId: string | undefined;
   if (thread.platform === "discord") {
