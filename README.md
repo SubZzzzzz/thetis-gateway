@@ -93,25 +93,17 @@ Le fichier `config.json` contient le token en clair. Sur une machine mono-utilis
 
 ## Démarrage
 
-### Manuel (dans Pi)
-
-```
-/gateway start          # Démarre tout
-/gateway start discord  # Démarre Discord uniquement
-/gateway start whatsapp # Démarre WhatsApp uniquement
-```
-
-Si `autoStart` est `true`, les gateways se connectent automatiquement au début de chaque session Pi.
-
-### Automatique au boot (systemd)
+Les gateways sont conçus pour tourner en arrière-plan via le service systemd. Elles ne démarrent pas dans le TUI : utilisez `/gateway-boot` pour les contrôler.
 
 ```
 /gateway-boot install   # Installer le service systemd user
 /gateway-boot start     # Démarrer le service maintenant
+/gateway-boot stop      # Arrêter le service
+/gateway-boot status    # État du service (journal systemd)
 /gateway-boot linger    # Activer le démarrage au boot (avant login)
 ```
 
-**Principe** : le service lance Pi en mode **RPC** (`pi --mode rpc`) en arrière-plan. Le gateway démarre automatiquement grâce à `autoStart`. Discord et WhatsApp peuvent alors interagir avec Pi sans terminal ouvert.
+**Principe** : le service lance Pi en mode **RPC** (`pi --mode rpc`) en arrière-plan. Si `autoStart` est `true`, les gateways démarrent automatiquement à l'intérieur du service. Discord et WhatsApp peuvent alors interagir avec Pi sans terminal ouvert.
 
 #### Commandes de gestion du boot
 
@@ -200,9 +192,6 @@ Ces commandes fonctionnent depuis le terminal Pi **et** depuis Discord/WhatsApp.
 | `/gateway status` | État des connexions et threads | ✅ |
 | `/gateway threads` | Lister les conversations actives | ✅ |
 | `/gateway clear [id]` | Vider l'historique d'un canal | ✅ |
-| `/gateway start [discord\|whatsapp]` | Démarrer les gateways | ✅ |
-| `/gateway stop [discord\|whatsapp]` | Arrêter les gateways | ✅ |
-| `/gateway restart [discord\|whatsapp]` | Reconnecter Discord/WhatsApp (soft reconnect) | ✅ |
 | `/gateway qr` | (Re)lancer la connexion WhatsApp et afficher un QR code | ✅ |
 | `/gateway reset-whatsapp` | Supprimer les credentials WhatsApp et forcer un nouveau QR | ✅ |
 | `/gateway-boot start` | Démarrer le service systemd | ✅ |
@@ -291,7 +280,7 @@ Le QR code WhatsApp s'affiche comme un **widget au-dessus de l'éditeur** dans l
 Si la connexion WhatsApp tombe (réseau instable, serveur temporairement indisponible) :
 - Le gateway retente **3 fois**, espacées de **5 secondes**
 - Au-delà, il passe en **erreur fatale** (visible avec `/gateway status` préfixé par ⛔)
-- Pour réessayer : `/gateway start whatsapp`, `/gateway restart whatsapp` ou `/gateway qr`
+- Pour réessayer : redémarre le service avec `/gateway-boot stop` puis `/gateway-boot start`, ou utilise `/gateway qr`
 - En cas de **logged out** (session expirée ou déconnectée depuis le téléphone) : pas de retry automatique — utilisez `/gateway reset-whatsapp` pour effacer les credentials puis rescanner le QR (ou `/gateway qr` pour forcer un nouveau cycle de connexion si l'état d'auth est encore récupérable)
 
 ### Fallback intents Discord (MessageContent)
@@ -300,7 +289,7 @@ Discord requiert un "privileged intent" pour lire le contenu textuel des message
 - Le gateway détecte l'erreur `disallowed intents` et se reconnecte **sans cet intent**
 - Le bot reste en ligne mais **ne peut plus lire le texte des messages** (seulement les embeds, attachments et métadonnées)
 - Une notification s'affiche dans le TUI avec la marche à suivre
-- Recommandé : active l'intent dans le portal puis `/gateway restart discord`
+- Recommandé : active l'intent dans le portal puis redémarre le service avec `/gateway-boot stop` puis `/gateway-boot start`
 
 ## Intégration Thetis Memory
 

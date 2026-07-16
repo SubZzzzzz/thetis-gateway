@@ -895,12 +895,9 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
           name: "gateway",
           description: "Contrôle le gateway Discord/WhatsApp",
           options: [
-            { name: "start", type: 1, description: "Démarrer le gateway", options: [{ name: "target", type: 3, description: "discord ou whatsapp", required: false }] },
-            { name: "stop", type: 1, description: "Arrêter le gateway", options: [{ name: "target", type: 3, description: "discord ou whatsapp", required: false }] },
             { name: "status", type: 1, description: "État des connexions" },
             { name: "threads", type: 1, description: "Lister les conversations actives" },
             { name: "clear", type: 1, description: "Vider l’historique d’un canal", options: [{ name: "id", type: 3, description: "ID du canal (laisser vide pour tout vider)", required: false }] },
-            { name: "restart", type: 1, description: "Redémarrer le service gateway" },
             { name: "qr", type: 1, description: "(Re)lancer la connexion WhatsApp et afficher un QR code" },
             { name: "reset-whatsapp", type: 1, description: "Supprimer les credentials WhatsApp et forcer un nouveau QR" },
             { name: "setup", type: 1, description: "Configurer le gateway (requiert le TUI)" },
@@ -1595,35 +1592,6 @@ async function runGatewayCommand(
   const sub = parts[0]?.toLowerCase();
   const gCtx = getGatewayCtx();
 
-  if (sub === "start") {
-    const target = parts[1]?.toLowerCase();
-    // Reset fatal errors on explicit manual start so user can retry after fixing config
-    resetGatewayRuntimeState();
-    if (!target || target === "discord") await startDiscord(pi, gCtx);
-    if (!target || target === "whatsapp") await startWhatsApp(pi, gCtx);
-    const d = isDiscordReady() ? "🟢" : (runtimeState.discord.fatalError ? "⛔" : "🔴");
-    const w = isWhatsAppReady() ? "🟢" : (runtimeState.whatsapp.fatalError ? "⛔" : "🔴");
-    return { text: `Starting gateways...\nDiscord: ${d} | WhatsApp: ${w}` };
-  }
-
-  if (sub === "stop") {
-    const target = parts[1]?.toLowerCase();
-    if (!target || target === "discord") await stopDiscord(gCtx);
-    if (!target || target === "whatsapp") await stopWhatsApp(gCtx);
-    return { text: "Gateways stopped." };
-  }
-
-  if (sub === "restart") {
-    const target = parts[1]?.toLowerCase();
-    // Soft restart: reconnect Discord/WhatsApp without killing the Pi session
-    restartNotified = false;
-    if (!target || target === "discord") { await stopDiscord(gCtx); await startDiscord(pi, gCtx); }
-    if (!target || target === "whatsapp") { await stopWhatsApp(gCtx); await startWhatsApp(pi, gCtx); }
-    const d = isDiscordReady() ? "🟢" : (runtimeState.discord.fatalError ? "⛔" : "🔴");
-    const w = isWhatsAppReady() ? "🟢" : (runtimeState.whatsapp.fatalError ? "⛔" : "🔴");
-    return { text: `🔄 Gateway reconnecté.\nDiscord: ${d} | WhatsApp: ${w}` };
-  }
-
   if (sub === "qr") {
     if (!isGatewayEnabled("whatsapp")) {
       return { text: "⚠️ WhatsApp est désactivé dans la config. Lancez `/gateway setup` pour l'activer.", error: true };
@@ -1792,7 +1760,7 @@ async function runGatewayCommand(
     }
 
     const newConfig: GatewayConfig = {
-      autoStart: false,
+      autoStart: true,
       maxHistoryPerThread: parseInt(maxHistory, 10) || 100,
       discord: discordToken
         ? {
@@ -1812,13 +1780,13 @@ async function runGatewayCommand(
 
     saveConfig(newConfig);
     config = newConfig;
-    return { text: "Gateway config saved. Use /gateway start to connect." };
+    return { text: "Gateway config saved. Use /gateway-boot start to launch the service." };
   }
 
   // Unknown sub-command — return help
   return {
     text:
-      `Usage: /gateway start|stop|restart|qr|reset-whatsapp|status|threads|clear|setup [options]\n` +
+      `Usage: /gateway qr|reset-whatsapp|status|threads|clear|setup [options]\n` +
       `  qr              : (re)lance la connexion WhatsApp (affiche un QR si pas de creds)\n` +
       `  reset-whatsapp  : supprime les creds WhatsApp et force un nouveau QR`,
     error: true,
