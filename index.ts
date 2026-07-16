@@ -1762,6 +1762,9 @@ async function runGatewayCommand(
       ? whatsappPhones.split(",").map((s) => s.trim()).filter(Boolean)
       : [];
 
+    if (discordEnabled && !discordToken) {
+      return { text: "Discord is enabled but no bot token was provided. Setup aborted.", error: true };
+    }
     if (discordEnabled && parsedDiscordIds.length === 0) {
       return { text: "Discord is enabled but no authorized user IDs were provided. Setup aborted.", error: true };
     }
