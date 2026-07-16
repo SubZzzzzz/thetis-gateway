@@ -1704,19 +1704,29 @@ async function runGatewayCommand(
         error: true,
       };
     }
-    const prevDiscordToken = config.discord?.token || process.env.DISCORD_BOT_TOKEN || "";
-    const discordTokenRaw = await gCtx.ui.input(
-      "Discord bot token (leave empty to keep previous / skip Discord):",
-      prevDiscordToken
+    const prevDiscordEnabled = config.discord?.enabled ?? true;
+    const discordEnabled = await gCtx.ui.confirm(
+      "Enable Discord gateway?",
+      prevDiscordEnabled
     );
-    const discordToken = discordTokenRaw.trim() || prevDiscordToken;
 
-    const prevDiscordUserIds = config.discord?.allowedUserIds?.join(", ") || "";
-    const discordUserIdsRaw = await gCtx.ui.input(
-      "Authorized Discord user IDs (comma-separated, REQUIRED if Discord enabled):",
-      prevDiscordUserIds
-    );
-    const discordUserIds = discordUserIdsRaw.trim() || prevDiscordUserIds;
+    let discordToken = "";
+    let discordUserIds = "";
+    if (discordEnabled) {
+      const prevDiscordToken = config.discord?.token || process.env.DISCORD_BOT_TOKEN || "";
+      const discordTokenRaw = await gCtx.ui.input(
+        "Discord bot token (leave empty to keep previous):",
+        prevDiscordToken
+      );
+      discordToken = discordTokenRaw.trim() || prevDiscordToken;
+
+      const prevDiscordUserIds = config.discord?.allowedUserIds?.join(", ") || "";
+      const discordUserIdsRaw = await gCtx.ui.input(
+        "Authorized Discord user IDs (comma-separated, REQUIRED if Discord enabled):",
+        prevDiscordUserIds
+      );
+      discordUserIds = discordUserIdsRaw.trim() || prevDiscordUserIds;
+    }
 
     const prevWhatsappEnabled = config.whatsapp?.enabled ?? true;
     const whatsappEnabled = await gCtx.ui.confirm(
@@ -1752,7 +1762,7 @@ async function runGatewayCommand(
       ? whatsappPhones.split(",").map((s) => s.trim()).filter(Boolean)
       : [];
 
-    if (discordToken && parsedDiscordIds.length === 0) {
+    if (discordEnabled && parsedDiscordIds.length === 0) {
       return { text: "Discord is enabled but no authorized user IDs were provided. Setup aborted.", error: true };
     }
     if (whatsappEnabled && parsedWhatsappPhones.length === 0) {
@@ -1762,7 +1772,7 @@ async function runGatewayCommand(
     const newConfig: GatewayConfig = {
       autoStart: true,
       maxHistoryPerThread: parseInt(maxHistory, 10) || 100,
-      discord: discordToken
+      discord: discordEnabled
         ? {
             enabled: true,
             token: discordToken,
