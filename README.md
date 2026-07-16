@@ -29,8 +29,8 @@ Puis relancer Pi ou faire `/reload`.
 ### Installation manuelle (développement)
 
 ```bash
-git clone https://github.com/SubZzzzzz/thetis-gateway.git ~/.pi/agent/extensions/thetis-gateway
-cd ~/.pi/agent/extensions/thetis-gateway
+git clone https://github.com/SubZzzzzz/thetis-gateway.git ~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway
+cd ~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway
 npm install
 ```
 
@@ -53,11 +53,11 @@ Wizard qui demande :
 
 > 💡 **Conseil** : appuyez simplement sur **Entrée** pour conserver la valeur actuelle d'un champ.
 
-La config est sauvegardée dans `~/.pi/agent/extensions/thetis-gateway/config.json`.
+La config est sauvegardée dans `~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway/config.json`.
 
 ### Manuelle
 
-Créer `~/.pi/agent/extensions/thetis-gateway/config.json` :
+Créer `~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway/config.json` :
 
 ```json
 {
@@ -81,8 +81,8 @@ Créer `~/.pi/agent/extensions/thetis-gateway/config.json` :
 
 **Permissions recommandées** (hygiène de base) :
 ```bash
-chmod 700 ~/.pi/agent/extensions/thetis-gateway
-chmod 600 ~/.pi/agent/extensions/thetis-gateway/config.json
+chmod 700 ~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway
+chmod 600 ~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway/config.json
 ```
 Le fichier `config.json` contient le token en clair. Sur une machine mono-utilisateur ce n'est pas critique, mais c'est une bonne hygiène de restreindre sa lecture.
 
@@ -128,7 +128,7 @@ Si `autoStart` est `true`, les gateways se connectent automatiquement au début 
 
 ```bash
 # Installer le service
-~/.pi/agent/extensions/thetis-gateway/scripts/install-boot.sh install
+~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway/scripts/install-boot.sh install
 
 # Démarrer au boot même avant login
 loginctl enable-linger $USER
@@ -143,7 +143,7 @@ journalctl --user -u thetis-gateway -f
 #### Fichiers du service
 
 - **Service** : `~/.config/systemd/user/thetis-gateway.service`
-- **Wrapper** : `~/.pi/agent/extensions/thetis-gateway/scripts/pi-rpc-wrapper.sh`
+- **Wrapper** : `~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway/scripts/pi-rpc-wrapper.sh`
 - **Logs** : `journalctl --user -u thetis-gateway`
 
 ## WhatsApp — Authentification
@@ -264,7 +264,7 @@ L'utilisateur sélectionne une option ou écrit une réponse personnalisée. La 
 
 ### Historique persistant
 
-Chaque canal a son historique sauvegardé dans `~/.pi/agent/extensions/thetis-gateway/threads/` :
+Chaque canal a son historique sauvegardé dans `~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway/threads/` :
 - `discord:#1234567890.json`
 - `whatsapp:1234567890@s.whatsapp.net.json`
 

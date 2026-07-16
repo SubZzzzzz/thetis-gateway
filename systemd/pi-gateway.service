@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.pi/agent/extensions/thetis-gateway/scripts/pi-rpc-wrapper.sh
+ExecStart=@@EXT_DIR@@/scripts/pi-rpc-wrapper.sh
 Restart=always
 RestartSec=10
 StandardOutput=journal

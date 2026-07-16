@@ -5,7 +5,8 @@
 
 set -euo pipefail
 
-EXT_DIR="$HOME/.pi/agent/extensions/thetis-gateway"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVICE_NAME="thetis-gateway"
 SERVICE_SRC="$EXT_DIR/systemd/pi-gateway.service"
 SERVICE_DIR="$HOME/.config/systemd/user"
@@ -20,7 +21,7 @@ install_service() {
   echo "Installing $SERVICE_NAME user service..."
 
   mkdir -p "$SERVICE_DIR"
-  cp "$SERVICE_SRC" "$SERVICE_DST"
+  sed -e "s|@@EXT_DIR@@|$EXT_DIR|g" "$SERVICE_SRC" > "$SERVICE_DST"
 
   systemctl --user daemon-reload
   systemctl --user enable "$SERVICE_NAME"

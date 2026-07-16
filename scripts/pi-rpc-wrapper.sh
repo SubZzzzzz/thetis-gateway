@@ -10,7 +10,8 @@ set -euo pipefail
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:$PATH"
 
 # Source any local env overrides
-[ -f "$HOME/.pi/agent/extensions/thetis-gateway/.env" ] && source "$HOME/.pi/agent/extensions/thetis-gateway/.env"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$SCRIPT_DIR/../.env" ] && source "$SCRIPT_DIR/../.env"
 
 # Run pi in RPC mode with an open stdin so it doesn't exit.
 # 'tail -f /dev/null' provides an open pipe that never produces data.

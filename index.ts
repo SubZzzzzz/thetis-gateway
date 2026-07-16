@@ -26,7 +26,7 @@ import type {
 /*  Paths                                                              */
 /* ------------------------------------------------------------------ */
 
-const EXT_DIR = path.join(homedir(), ".pi", "agent", "extensions", "thetis-gateway");
+const EXT_DIR = path.join(__dirname);
 const CONFIG_PATH = path.join(EXT_DIR, "config.json");
 const THREADS_DIR = path.join(EXT_DIR, "threads");
 
