@@ -13,7 +13,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { homedir } from "node:os";
 import { Type } from "typebox";
-import pdfParse from "pdf-parse";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -2219,6 +2218,9 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       try {
+        // Dynamic import to avoid crash at extension load time
+        const pdfParse = (await import("pdf-parse")).default || (await import("pdf-parse"));
+        
         if (!fs.existsSync(params.filePath)) {
           return {
             content: [{ type: "text", text: `Erreur : fichier non trouvé : ${params.filePath}` }],
