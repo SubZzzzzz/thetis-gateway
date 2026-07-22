@@ -27,7 +27,6 @@
     "@types/qrcode-terminal": "^0.12.2",
     "@whiskeysockets/baileys": "^7.0.0-rc13",
     "discord.js": "^14.15.3",
-    "pdf-parse": "^1.1.1",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0"
   },

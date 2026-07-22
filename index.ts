@@ -2206,62 +2206,18 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
     },
   });
 
-  /* ----  PDF Extract Tool  ---- */
-  pi.registerTool({
-    name: "pdf_to_text",
-    label: "PDF to Text",
-    description:
-      "Extrait le texte d'un fichier PDF. Utilisez cet outil quand un PDF a été sauvegardé dans le dossier files/ de l'extension.",
-    parameters: Type.Object({
-      filePath: Type.String({ description: "Chemin complet du fichier PDF à extraire" }),
-    }),
-
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      try {
-        // Dynamic import to avoid crash at extension load time
-        const pdfParse = (await import("pdf-parse")).default || (await import("pdf-parse"));
-        
-        if (!fs.existsSync(params.filePath)) {
-          return {
-            content: [{ type: "text", text: `Erreur : fichier non trouvé : ${params.filePath}` }],
-            details: { filePath: params.filePath, error: "File not found" },
-          };
-        }
-
-        const dataBuffer = fs.readFileSync(params.filePath);
-        const data = await pdfParse(dataBuffer);
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Texte extrait du PDF (${data.numpages} pages) :\n\n${data.text}`,
-            },
-          ],
-          details: {
-            filePath: params.filePath,
-            numPages: data.numpages,
-            textLength: data.text.length,
-          },
-        };
-      } catch (err: any) {
-        return {
-          content: [{ type: "text", text: `Erreur lors de l'extraction du PDF : ${err.message}` }],
-          details: { filePath: params.filePath, error: err.message },
-        };
-      }
-    },
-  });
-
   /* ----  System Prompt Injection  ---- */
   pi.on("before_agent_start", async (event, _ctx) => {
-    // Check if any PDF files were saved in the current message
-    const hasPdfMention = event.prompt.includes("[File saved:") && event.prompt.includes(".pdf");
+    const hasFileMention = event.prompt.includes("[File saved:");
 
-    if (hasPdfMention) {
-      const pdfInstruction = "\n\nIMPORTANT : Un fichier PDF a été sauvegardé. Utilisez le tool `pdf_to_text` avec le chemin du fichier pour extraire son contenu et pouvoir le lire.";
+    if (hasFileMention) {
+      let fileInstruction = "\n\nIMPORTANT : Des fichiers ont été sauvegardés sur le disque.";
+      if (event.prompt.includes(".pdf")) {
+        fileInstruction += " Pour les PDF, utilisez `bash` avec `pdftotext <chemin> -` pour extraire le texte. Si pdftotext n'est pas installé, utilisez `apt install poppler-utils`.";
+      }
+      fileInstruction += " Vous pouvez utiliser `read` ou `bash` pour accéder aux fichiers sauvegardés.";
       return {
-        systemPrompt: event.systemPrompt + pdfInstruction,
+        systemPrompt: event.systemPrompt + fileInstruction,
       };
     }
 
