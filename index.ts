@@ -13,6 +13,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { homedir } from "node:os";
 import { Type } from "typebox";
+import pdfParse from "pdf-parse";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -29,6 +30,7 @@ import type {
 const EXT_DIR = path.join(__dirname);
 const CONFIG_PATH = path.join(EXT_DIR, "config.json");
 const THREADS_DIR = path.join(EXT_DIR, "threads");
+const FILES_DIR = path.join(EXT_DIR, "files");
 
 /* ------------------------------------------------------------------ */
 /*  Config                                                             */
@@ -1426,7 +1428,15 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
               const content = buffer.toString("utf8");
               text += `\n\n--- File: ${msg.message.documentMessage?.fileName || "attachment"} ---\n\`\`\`\n${content.slice(0, 8000)}\n\`\`\``;
             } else {
-              text += `\n\n[File attached: ${msg.message.documentMessage?.fileName || "attachment"} (${mediaType})]`;
+              // Save non-image, non-text files to disk
+              if (!fs.existsSync(FILES_DIR)) {
+                fs.mkdirSync(FILES_DIR, { recursive: true });
+              }
+              const fileName = msg.message.documentMessage?.fileName || `file_${Date.now()}`;
+              const safeFileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+              const filePath = path.join(FILES_DIR, safeFileName);
+              fs.writeFileSync(filePath, buffer);
+              text += `\n\n[File saved: ${filePath} (${mediaType})]`;
             }
           }
         } catch {
@@ -2195,6 +2205,65 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
         },
       };
     },
+  });
+
+  /* ----  PDF Extract Tool  ---- */
+  pi.registerTool({
+    name: "pdf_to_text",
+    label: "PDF to Text",
+    description:
+      "Extrait le texte d'un fichier PDF. Utilisez cet outil quand un PDF a été sauvegardé dans le dossier files/ de l'extension.",
+    parameters: Type.Object({
+      filePath: Type.String({ description: "Chemin complet du fichier PDF à extraire" }),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      try {
+        if (!fs.existsSync(params.filePath)) {
+          return {
+            content: [{ type: "text", text: `Erreur : fichier non trouvé : ${params.filePath}` }],
+            details: { filePath: params.filePath, error: "File not found" },
+          };
+        }
+
+        const dataBuffer = fs.readFileSync(params.filePath);
+        const data = await pdfParse(dataBuffer);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Texte extrait du PDF (${data.numpages} pages) :\n\n${data.text}`,
+            },
+          ],
+          details: {
+            filePath: params.filePath,
+            numPages: data.numpages,
+            textLength: data.text.length,
+          },
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: "text", text: `Erreur lors de l'extraction du PDF : ${err.message}` }],
+          details: { filePath: params.filePath, error: err.message },
+        };
+      }
+    },
+  });
+
+  /* ----  System Prompt Injection  ---- */
+  pi.on("before_agent_start", async (event, _ctx) => {
+    // Check if any PDF files were saved in the current message
+    const hasPdfMention = event.prompt.includes("[File saved:") && event.prompt.includes(".pdf");
+
+    if (hasPdfMention) {
+      const pdfInstruction = "\n\nIMPORTANT : Un fichier PDF a été sauvegardé. Utilisez le tool `pdf_to_text` avec le chemin du fichier pour extraire son contenu et pouvoir le lire.";
+      return {
+        systemPrompt: event.systemPrompt + pdfInstruction,
+      };
+    }
+
+    return {};
   });
 
   /* ----  Commands  ---- */

@@ -9,6 +9,7 @@ package-lock.json
 
 # Runtime data
 threads/
+files/
 *.log
 
 # Auth & secrets
