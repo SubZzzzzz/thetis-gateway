@@ -2208,6 +2208,18 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
 
   /* ----  System Prompt Injection  ---- */
   pi.on("before_agent_start", async (event, _ctx) => {
+    let injection = "";
+
+    // CRITICAL: In gateway mode, force use of gateway_question instead of tui_question
+    // This prevents the LLM from calling tui_question which blocks indefinitely
+    // because tui_question waits for a TUI RPC response that never comes in gateway mode
+    if (currentThreadId || _ctx.mode === "rpc") {
+      injection += "\n\n⚠️ GATEWAY MODE ACTIVE (WhatsApp/Discord):";
+      injection += "\n- ALWAYS use `gateway_question` tool for user interactions (questions, confirmations, choices)";
+      injection += "\n- NEVER use `tui_question` — it will block indefinitely in gateway mode";
+      injection += "\n- `gateway_question` sends interactive polls via the active gateway (WhatsApp/Discord)";
+    }
+
     const hasFileMention = event.prompt.includes("[File saved:");
 
     if (hasFileMention) {
@@ -2216,8 +2228,12 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
         fileInstruction += " Pour les PDF, utilisez `bash` avec `pdftotext <chemin> -` pour extraire le texte. Si pdftotext n'est pas installé, utilisez `apt install poppler-utils`.";
       }
       fileInstruction += " Vous pouvez utiliser `read` ou `bash` pour accéder aux fichiers sauvegardés.";
+      injection += fileInstruction;
+    }
+
+    if (injection) {
       return {
-        systemPrompt: event.systemPrompt + fileInstruction,
+        systemPrompt: event.systemPrompt + injection,
       };
     }
 
