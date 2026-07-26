@@ -514,8 +514,11 @@ async function disableDiscordPollButtons(channelId: string, messageId: string): 
 /*  WhatsApp Poll — interactive list message                          */
 /* ------------------------------------------------------------------ */
 
-async function sendWhatsAppPoll(jid: string, question: string, options: string[]): Promise<void> {
-  if (!isWhatsAppReady()) return;
+async function sendWhatsAppPoll(jid: string, question: string, options: string[]): Promise<boolean> {
+  if (!isWhatsAppReady()) {
+    console.error('[gateway] sendWhatsAppPoll: WhatsApp not ready');
+    return false;
+  }
 
   const rows = options.map((opt, i) => ({
     title: `${i + 1}. ${opt.slice(0, 72)}`,
@@ -529,13 +532,20 @@ async function sendWhatsAppPoll(jid: string, question: string, options: string[]
     rowId: "gateway_q_other",
   });
 
-  await whatsappSock.sendMessage(jid, {
-    text: `🗳️ ${question}`,
-    footer: "Sélectionnez une option ci-dessous",
-    title: "Sondage",
-    buttonText: "Voir les options",
-    sections: [{ title: "Options disponibles", rows }],
-  }).catch(() => null);
+  try {
+    const result = await whatsappSock.sendMessage(jid, {
+      text: `🗳️ ${question}`,
+      footer: "Sélectionnez une option ci-dessous",
+      title: "Sondage",
+      buttonText: "Voir les options",
+      sections: [{ title: "Options disponibles", rows }],
+    });
+    console.log(`[gateway] sendWhatsAppPoll: poll sent to ${jid}, messageId: ${result?.key?.id}`);
+    return true;
+  } catch (err) {
+    console.error('[gateway] sendWhatsAppPoll: failed to send poll:', err);
+    return false;
+  }
 }
 
 function checkQuestionResponse(threadId: string, text: string): { handled: boolean; consume: boolean } {
@@ -2254,7 +2264,18 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
             if (pending && msgId) pending.messageId = msgId;
           });
         } else {
-          sendWhatsAppPoll(thread.channelId, params.question, params.options);
+          // WhatsApp: check if poll was sent successfully
+          (async () => {
+            const sent = await sendWhatsAppPoll(thread.channelId, params.question, params.options);
+            if (!sent) {
+              const pending = pendingQuestions.get(threadId);
+              if (pending) {
+                clearTimeout(pending.timeout);
+                pendingQuestions.delete(threadId);
+              }
+              resolve({ answer: null, wasCustom: false, error: "WhatsApp not ready or poll failed to send. Check service status." });
+            }
+          })();
         }
       });
 
