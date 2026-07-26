@@ -1,11 +1,12 @@
 [Unit]
-Description=Pi Coding Agent Gateway (Discord + WhatsApp)
+Description=Pi Coding Agent Gateway (WhatsApp)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=@@EXT_DIR@@/scripts/pi-rpc-wrapper.sh
+Environment=GATEWAY_PLATFORM=whatsapp
+ExecStart=@@EXT_DIR@@/scripts/pi-rpc-wrapper.sh whatsapp
 Restart=always
 RestartSec=10
 StandardOutput=journal

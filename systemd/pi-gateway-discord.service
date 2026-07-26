@@ -1,0 +1,16 @@
+[Unit]
+Description=Pi Coding Agent Gateway (Discord)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=GATEWAY_PLATFORM=discord
+ExecStart=@@EXT_DIR@@/scripts/pi-rpc-wrapper.sh discord
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

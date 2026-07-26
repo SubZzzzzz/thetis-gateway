@@ -1863,8 +1863,17 @@ async function runGatewayBootCommand(
   const parts = args.trim().split(/\s+/);
   const sub = parts[0]?.toLowerCase();
   const installScript = path.join(EXT_DIR, "scripts", "install-boot.sh");
-  const serviceName = "thetis-gateway";
+  const discordService = "thetis-gateway-discord";
+  const whatsappService = "thetis-gateway-whatsapp";
   const gCtx = getGatewayCtx();
+
+  // Helper: get list of enabled services based on config
+  const getEnabledServices = (): string[] => {
+    const services: string[] = [];
+    if (config.discord?.enabled) services.push(discordService);
+    if (config.whatsapp?.enabled) services.push(whatsappService);
+    return services;
+  };
 
   if (sub === "install" || sub === "enable") {
     if (!gCtx.hasUI) {
@@ -1876,7 +1885,7 @@ async function runGatewayBootCommand(
     try {
       const { execSync } = await import("node:child_process");
       execSync(`"${installScript}" install`, { stdio: "inherit" });
-      return { text: "Boot service installed. Run /gateway-boot start to launch." };
+      return { text: "Boot services installed. Run /gateway-boot start to launch." };
     } catch {
       return { text: "Boot service installation failed.", error: true };
     }
@@ -1892,39 +1901,62 @@ async function runGatewayBootCommand(
     try {
       const { execSync } = await import("node:child_process");
       execSync(`"${installScript}" remove`, { stdio: "inherit" });
-      return { text: "Boot service removed." };
+      return { text: "Boot services removed." };
     } catch {
       return { text: "Boot service removal failed.", error: true };
     }
   }
 
   if (sub === "start") {
+    const enabled = getEnabledServices();
+    if (enabled.length === 0) {
+      return { text: "No gateway enabled in config. Run /gateway setup to enable Discord or WhatsApp.", error: true };
+    }
     try {
       const { execSync } = await import("node:child_process");
-      execSync(`systemctl --user start ${serviceName}`, { stdio: "pipe" });
-      return { text: "Gateway service started." };
+      const started: string[] = [];
+      for (const svc of enabled) {
+        try {
+          execSync(`systemctl --user start ${svc}`, { stdio: "pipe" });
+          started.push(svc);
+        } catch (e: any) {
+          return { text: `Failed to start ${svc}: ${e.stderr?.toString() || e.message}`, error: true };
+        }
+      }
+      return { text: `Started: ${started.join(", ")}` };
     } catch {
-      return { text: "Failed to start gateway service.", error: true };
+      return { text: "Failed to start gateway services.", error: true };
     }
   }
 
   if (sub === "stop") {
     try {
       const { execSync } = await import("node:child_process");
-      execSync(`systemctl --user stop ${serviceName}`, { stdio: "pipe" });
-      return { text: "Gateway service stopped." };
+      execSync(`systemctl --user stop ${discordService} ${whatsappService} 2>/dev/null || true`, { stdio: "pipe" });
+      return { text: "Gateway services stopped." };
     } catch {
-      return { text: "Failed to stop gateway service.", error: true };
+      return { text: "Failed to stop gateway services.", error: true };
     }
   }
 
   if (sub === "status") {
     try {
       const { execSync } = await import("node:child_process");
-      const out = execSync(`systemctl --user status ${serviceName} --no-pager`, { encoding: "utf8" });
-      return { text: out.slice(0, 1800) };
-    } catch (err: any) {
-      return { text: err.stdout?.toString()?.slice(0, 1800) || "Service not running.", error: true };
+      let out = "";
+      for (const svc of [discordService, whatsappService]) {
+        try {
+          out += `=== ${svc} ===\n`;
+          out += execSync(`systemctl --user status ${svc} --no-pager`, { encoding: "utf8" });
+          out += "\n";
+        } catch (err: any) {
+          out += `=== ${svc} ===\n`;
+          out += err.stdout?.toString() || "Not running";
+          out += "\n\n";
+        }
+      }
+      return { text: out.slice(0, 3000) };
+    } catch {
+      return { text: "Failed to get status.", error: true };
     }
   }
 
@@ -1938,7 +1970,7 @@ async function runGatewayBootCommand(
     try {
       const { execSync } = await import("node:child_process");
       execSync(`loginctl enable-linger $USER`, { stdio: "inherit" });
-      return { text: "User linger enabled. Service will start at boot even before login." };
+      return { text: "User linger enabled. Services will start at boot even before login." };
     } catch {
       return { text: "Failed to enable linger. You may need sudo.", error: true };
     }
@@ -2072,9 +2104,21 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
 
     // Auto-start gateways only when Pi runs as a service (RPC mode).
     // In TUI mode the user must start them manually with /gateway start.
+    // GATEWAY_PLATFORM env var restricts which gateway to start (set by systemd services).
     if (config.autoStart && ctx.mode === "rpc") {
-      if (isGatewayEnabled("discord")) await startDiscord(pi, ctx);
-      if (isGatewayEnabled("whatsapp")) await startWhatsApp(pi, ctx);
+      const platform = process.env.GATEWAY_PLATFORM;
+      
+      if (platform === "discord") {
+        // Only start Discord
+        if (isGatewayEnabled("discord")) await startDiscord(pi, ctx);
+      } else if (platform === "whatsapp") {
+        // Only start WhatsApp
+        if (isGatewayEnabled("whatsapp")) await startWhatsApp(pi, ctx);
+      } else {
+        // No platform restriction (backward compat or TUI mode)
+        if (isGatewayEnabled("discord")) await startDiscord(pi, ctx);
+        if (isGatewayEnabled("whatsapp")) await startWhatsApp(pi, ctx);
+      }
     }
 
     // Reset session tracking (but keep lastActivePlatform/lastActiveChannelId
