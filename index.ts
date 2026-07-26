@@ -1805,10 +1805,10 @@ async function runGatewayCommand(
     const maxHistory = maxHistoryRaw.trim() || prevMaxHistory;
 
     const parsedDiscordIds = discordUserIds
-      ? discordUserIds.split(",").map((s) => s.trim()).filter(Boolean)
+      ? discordUserIds.split(/[,;\-\s]+/).map((s) => s.trim()).filter(Boolean)
       : [];
     const parsedWhatsappPhones = whatsappPhones
-      ? whatsappPhones.split(",").map((s) => s.trim()).filter(Boolean)
+      ? whatsappPhones.split(/[,;\-\s]+/).map((s) => s.trim()).filter(Boolean)
       : [];
 
     if (discordEnabled && !discordToken) {
