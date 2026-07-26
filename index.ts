@@ -27,9 +27,49 @@ import type {
 /* ------------------------------------------------------------------ */
 
 const EXT_DIR = path.join(__dirname);
-const CONFIG_PATH = path.join(EXT_DIR, "config.json");
-const THREADS_DIR = path.join(EXT_DIR, "threads");
-const FILES_DIR = path.join(EXT_DIR, "files");
+// Data directory OUTSIDE the git repo to survive `pi update --extensions`
+// (which runs `git clean -fdx` and deletes ignored files like config.json)
+const DATA_DIR = path.join(homedir(), ".pi", "agent", "extensions-data", "thetis-gateway");
+const CONFIG_PATH = path.join(DATA_DIR, "config.json");
+const THREADS_DIR = path.join(DATA_DIR, "threads");
+const FILES_DIR = path.join(DATA_DIR, "files");
+
+// Ensure DATA_DIR exists on module load
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// Migrate existing data from EXT_DIR to DATA_DIR if needed (one-time)
+function migrateFromExtDir() {
+  const migrations = [
+    { src: path.join(EXT_DIR, "config.json"), dst: path.join(DATA_DIR, "config.json") },
+    { src: path.join(EXT_DIR, "threads"), dst: path.join(DATA_DIR, "threads") },
+    { src: path.join(EXT_DIR, "files"), dst: path.join(DATA_DIR, "files") },
+  ];
+  // Also migrate any .baileys_auth_* directories
+  try {
+    for (const entry of fs.readdirSync(EXT_DIR)) {
+      if (entry.startsWith(".baileys_auth_")) {
+        migrations.push({
+          src: path.join(EXT_DIR, entry),
+          dst: path.join(DATA_DIR, entry),
+        });
+      }
+    }
+  } catch {}
+
+  for (const { src, dst } of migrations) {
+    if (fs.existsSync(src) && !fs.existsSync(dst)) {
+      try {
+        fs.renameSync(src, dst);
+        console.log(`[thetis-gateway] Migrated ${src} → ${dst}`);
+      } catch (e) {
+        console.error(`[thetis-gateway] Migration failed for ${src}:`, e);
+      }
+    }
+  }
+}
+migrateFromExtDir();
 
 /* ------------------------------------------------------------------ */
 /*  Config                                                             */
@@ -60,7 +100,7 @@ function loadConfig(): GatewayConfig {
 }
 
 function saveConfig(cfg: GatewayConfig): void {
-  if (!fs.existsSync(EXT_DIR)) fs.mkdirSync(EXT_DIR, { recursive: true });
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n", "utf8");
 }
 
@@ -1094,7 +1134,7 @@ function isGatewayEnabled(platform: "discord" | "whatsapp"): boolean {
 
 function getWhatsAppAuthDir(): string {
   const sessionName = config.whatsapp?.sessionName ?? "thetis-gateway";
-  return path.join(EXT_DIR, `.baileys_auth_${sessionName}`);
+  return path.join(DATA_DIR, `.baileys_auth_${sessionName}`);
 }
 
 function resetWhatsAppAuth(): { deleted: boolean; path: string } {
