@@ -520,31 +520,52 @@ async function sendWhatsAppPoll(jid: string, question: string, options: string[]
     return false;
   }
 
-  const rows = options.map((opt, i) => ({
-    title: `${i + 1}. ${opt.slice(0, 72)}`,
-    description: "",
-    rowId: `gateway_q_${i}`,
-  }));
-
-  rows.push({
-    title: `${options.length + 1}. ✏️ Autres...`,
-    description: "Écrivez votre propre réponse",
-    rowId: "gateway_q_other",
-  });
-
   try {
+    // Try buttons first (more compatible than lists)
+    const buttons = options.slice(0, 3).map((opt, i) => ({
+      buttonId: `gateway_q_${i}`,
+      buttonText: { displayText: `${i + 1}. ${opt.slice(0, 20)}` },
+      type: 1
+    }));
+
+    // Add "Other" button if room
+    if (buttons.length < 3) {
+      buttons.push({
+        buttonId: 'gateway_q_other',
+        buttonText: { displayText: '✏️ Autres...' },
+        type: 1
+      });
+    }
+
     const result = await whatsappSock.sendMessage(jid, {
-      text: `🗳️ ${question}`,
-      footer: "Sélectionnez une option ci-dessous",
-      title: "Sondage",
-      buttonText: "Voir les options",
-      sections: [{ title: "Options disponibles", rows }],
+      text: `🗳️ ${question}\n\n_Répondez avec le numéro de l'option ou cliquez sur un bouton._`,
+      footer: "Sélectionnez une option",
+      buttons,
+      headerType: 1
     });
+    
+    if (!result?.key?.id) {
+      // Buttons failed, fallback to numbered text
+      console.log('[gateway] sendWhatsAppPoll: buttons not supported, using text fallback');
+      const optionsText = options.map((opt, i) => `${i + 1}. ${opt}`).join('\n');
+      const fallbackText = `🗳️ ${question}\n\n${optionsText}\n${options.length + 1}. ✏️ Autres...\n\n_Répondez avec le numéro de votre choix._`;
+      await whatsappSock.sendMessage(jid, { text: fallbackText });
+    }
+    
     console.log(`[gateway] sendWhatsAppPoll: poll sent to ${jid}, messageId: ${result?.key?.id}`);
     return true;
   } catch (err) {
     console.error('[gateway] sendWhatsAppPoll: failed to send poll:', err);
-    return false;
+    // Last resort: send as plain text with numbered options
+    try {
+      const optionsText = options.map((opt, i) => `${i + 1}. ${opt}`).join('\n');
+      const fallbackText = `🗳️ ${question}\n\n${optionsText}\n${options.length + 1}. ✏️ Autres...\n\n_Répondez avec le numéro de votre choix._`;
+      await whatsappSock.sendMessage(jid, { text: fallbackText });
+      return true;
+    } catch (fallbackErr) {
+      console.error('[gateway] sendWhatsAppPoll: fallback also failed:', fallbackErr);
+      return false;
+    }
   }
 }
 
