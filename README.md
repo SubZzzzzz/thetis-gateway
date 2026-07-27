@@ -10,7 +10,7 @@ Extension **indépendante** qui transforme Pi en bot Discord et/ou WhatsApp avec
 - **Historique limité par canal** — chaque canal conserve ses N derniers messages (défaut : 100) en local, persistés entre les sessions. Les commandes `/new` et `/reset` vident l'historique du canal actif.
 - **File d'attente** — si Pi est occupé, les messages sont mis en file d'attente par canal sans perte
 - **Priorité TUI** — dès que vous tapez dans le terminal Pi, les réponses restent dans le TUI
-- **Démarrage au boot** — service systemd user pour lancer Pi + gateway automatiquement au démarrage du système
+- **Démarrage au boot** — deux services systemd user séparés (Discord et WhatsApp) pour lancer Pi + gateway automatiquement au démarrage du système
 - **Questions interactives** — support natif du tool `gateway_question` avec boutons Discord et listes WhatsApp
 - **Confirmation memory cross-extension** — quand `thetis-memory` demande une confirmation pour une action sensible (suppression, déplacement, réorganisation), le gateway affiche des boutons Discord ou un menu WhatsApp interactif
 
@@ -53,11 +53,11 @@ Wizard qui demande :
 
 > 💡 **Conseil** : appuyez simplement sur **Entrée** pour conserver la valeur actuelle d'un champ.
 
-La config est sauvegardée dans `~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway/config.json`.
+La config est sauvegardée dans `~/.pi/agent/extensions-data/thetis-gateway/config.json`.
 
 ### Manuelle
 
-Créer `~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway/config.json` :
+Créer `~/.pi/agent/extensions-data/thetis-gateway/config.json` :
 
 ```json
 {
@@ -81,8 +81,8 @@ Créer `~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway/config.json` :
 
 **Permissions recommandées** (hygiène de base) :
 ```bash
-chmod 700 ~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway
-chmod 600 ~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway/config.json
+chmod 700 ~/.pi/agent/extensions-data/thetis-gateway
+chmod 600 ~/.pi/agent/extensions-data/thetis-gateway/config.json
 ```
 Le fichier `config.json` contient le token en clair. Sur une machine mono-utilisateur ce n'est pas critique, mais c'est une bonne hygiène de restreindre sa lecture.
 
@@ -93,50 +93,70 @@ Le fichier `config.json` contient le token en clair. Sur une machine mono-utilis
 
 ## Démarrage
 
-Les gateways sont conçus pour tourner en arrière-plan via le service systemd. Elles ne démarrent pas dans le TUI : utilisez `/gateway-boot` pour les contrôler.
+Les gateways sont conçus pour tourner en arrière-plan via **deux services systemd séparés** (un pour Discord, un pour WhatsApp). Ils ne démarrent pas dans le TUI : utilisez `/gateway-boot` pour les contrôler.
+
+### Architecture à deux services
+
+Le système utilise deux services systemd indépendants pour isoler les contextes :
+
+- **`thetis-gateway-discord.service`** — Gère uniquement Discord
+- **`thetis-gateway-whatsapp.service`** — Gère uniquement WhatsApp
+
+Chaque service lance sa propre instance Pi RPC avec un contexte agent isolé. Cela permet :
+- Contextes conversationnels séparés (Discord et WhatsApp ne partagent pas d'historique)
+- Contrôle indépendant (peut redémarrer l'un sans affecter l'autre)
+- Meilleure gestion des ressources
+
+Le choix du gateway à démarrer est contrôlé par la variable d'environnement `GATEWAY_PLATFORM` définie automatiquement par chaque service.
 
 ```
-/gateway-boot install   # Installer le service systemd user
-/gateway-boot start     # Démarrer le service maintenant
-/gateway-boot stop      # Arrêter le service
-/gateway-boot status    # État du service (journal systemd)
+/gateway-boot install   # Installer les deux services systemd user
+/gateway-boot start     # Démarrer les services activés dans config.json
+/gateway-boot stop      # Arrêter les deux services
+/gateway-boot status    # État des deux services (journal systemd)
 /gateway-boot linger    # Activer le démarrage au boot (avant login)
 ```
 
-**Principe** : le service lance Pi en mode **RPC** (`pi --mode rpc`) en arrière-plan. Si `autoStart` est `true`, les gateways démarrent automatiquement à l'intérieur du service. Discord et WhatsApp peuvent alors interagir avec Pi sans terminal ouvert.
+**Principe** : les services lancent Pi en mode **RPC** (`pi --mode rpc`) en arrière-plan. Si `autoStart` est `true`, les gateways démarrent automatiquement à l'intérieur du service. Discord et WhatsApp peuvent alors interagir avec Pi sans terminal ouvert.
 
 #### Commandes de gestion du boot
 
 | Commande | Description |
 |----------|-------------|
-| `/gateway-boot install` | Installe et active le service systemd user |
-| `/gateway-boot remove` | Supprime le service |
-| `/gateway-boot start` | Démarre le service |
-| `/gateway-boot stop` | Arrête le service |
-| `/gateway-boot status` | État du service (journal systemd) |
+| `/gateway-boot install` | Installe et active les deux services systemd user |
+| `/gateway-boot remove` | Supprime les deux services |
+| `/gateway-boot start` | Démarre les services activés dans config.json (Discord et/ou WhatsApp selon la config) |
+| `/gateway-boot stop` | Arrête les deux services |
+| `/gateway-boot status` | État des deux services (journal systemd) |
 | `/gateway-boot linger` | Active le démarrage au boot (loginctl) |
 
 #### Manuellement (sans Pi)
 
 ```bash
-# Installer le service
+# Installer les deux services
 ~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway/scripts/install-boot.sh install
 
 # Démarrer au boot même avant login
 loginctl enable-linger $USER
 
-# Démarrer maintenant
-systemctl --user start thetis-gateway
+# Démarrer les services
+systemctl --user start thetis-gateway-discord
+systemctl --user start thetis-gateway-whatsapp
 
 # Voir les logs
-journalctl --user -u thetis-gateway -f
+journalctl --user -u thetis-gateway-discord -f
+journalctl --user -u thetis-gateway-whatsapp -f
 ```
 
-#### Fichiers du service
+#### Fichiers des services
 
-- **Service** : `~/.config/systemd/user/thetis-gateway.service`
+- **Services** :
+  - `~/.config/systemd/user/thetis-gateway-discord.service`
+  - `~/.config/systemd/user/thetis-gateway-whatsapp.service`
 - **Wrapper** : `~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway/scripts/pi-rpc-wrapper.sh`
-- **Logs** : `journalctl --user -u thetis-gateway`
+- **Logs** :
+  - Discord : `journalctl --user -u thetis-gateway-discord`
+  - WhatsApp : `journalctl --user -u thetis-gateway-whatsapp`
 
 ## WhatsApp — Authentification
 
@@ -151,7 +171,7 @@ Scannez-le avec l'application WhatsApp de votre téléphone (**Appareils liés �
 
 Pour suivre le QR en mode boot :
 ```bash
-journalctl --user -u thetis-gateway -f
+journalctl --user -u thetis-gateway-whatsapp -f
 ```
 
 ### Self-chat (un seul utilisateur, le owner)
@@ -194,9 +214,9 @@ Ces commandes fonctionnent depuis le terminal Pi **et** depuis Discord/WhatsApp.
 | `/gateway clear [id]` | Vider l'historique d'un canal | ✅ |
 | `/gateway qr` | (Re)lancer la connexion WhatsApp et afficher un QR code | ✅ |
 | `/gateway reset-whatsapp` | Supprimer les credentials WhatsApp et forcer un nouveau QR | ✅ |
-| `/gateway-boot start` | Démarrer le service systemd | ✅ |
-| `/gateway-boot stop` | Arrêter le service systemd | ✅ |
-| `/gateway-boot status` | Voir l'état du service | ✅ |
+| `/gateway-boot start` | Démarrer les services systemd activés | ✅ |
+| `/gateway-boot stop` | Arrêter les services systemd | ✅ |
+| `/gateway-boot status` | Voir l'état des services | ✅ |
 
 ### Commandes TUI uniquement
 
@@ -205,8 +225,8 @@ Ces commandes nécessitent une interaction (prompts) et ne fonctionnent que depu
 | Commande | Description | Gateway |
 |----------|-------------|---------|
 | `/gateway setup` | Wizard de configuration interactive | ❌ |
-| `/gateway-boot install` | Installer le service systemd | ❌ |
-| `/gateway-boot remove` | Supprimer le service | ❌ |
+| `/gateway-boot install` | Installer les deux services systemd | ❌ |
+| `/gateway-boot remove` | Supprimer les deux services | ❌ |
 | `/gateway-boot linger` | Activer le démarrage au boot | ❌ |
 
 Depuis Discord/WhatsApp, vous recevrez un message indiquant comment exécuter la commande en terminal.
@@ -253,7 +273,7 @@ L'utilisateur sélectionne une option ou écrit une réponse personnalisée. La 
 
 ### Historique persistant
 
-Chaque canal a son historique sauvegardé dans `~/.pi/agent/git/github.com/SubZzzzzz/thetis-gateway/threads/` :
+Chaque canal a son historique sauvegardé dans `~/.pi/agent/extensions-data/thetis-gateway/threads/` :
 - `discord:#1234567890.json`
 - `whatsapp:1234567890@s.whatsapp.net.json`
 
@@ -301,22 +321,39 @@ Si `thetis-memory` est installé :
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  systemd user service (thetis-gateway.service)            │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  pi --mode rpc --no-session                     │    │
-│  │  ┌─────────────────────────────────────────┐    │    │
-│  │  │  thetis-gateway extension               │    │    │
-│  │  │  ┌──────────┐  ┌──────────┐  ┌────────┐ │    │    │
-│  │  │  │ Discord  │  │ WhatsApp │  │ Threads│ │    │    │
-│  │  │  │ Client   │  │ Client   │  │ Manager│ │    │    │
-│  │  │  └────┬─────┘  └────┬─────┘  └───┬────┘ │    │    │
-│  │  │       │             │            │      │    │    │
-│  │  │       └─────────────┴────────────┘      │    │    │
-│  │  │              pi.sendUserMessage()        │    │    │
-│  │  └─────────────────────────────────────────┘    │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  Deux services systemd séparés (contextes isolés)                    │
+│                                                                     │
+│  ┌───────────────────────────────────────────────────────────────┐ │
+│  │ thetis-gateway-discord.service                                │ │
+│  │ ┌─────────────────────────────────────────────────────────┐   │ │
+│  │ │ pi --mode rpc --name "gateway-discord"                  │   │ │
+│  │ │ GATEWAY_PLATFORM=discord                                │   │ │
+│  │ │ ┌────────────────────────────────────────────────────┐ │   │ │
+│  │ │ │ thetis-gateway extension (Discord only)           │ │   │ │
+│  │ │ │ ┌─────────┐  ┌─────────────────┐                 │ │   │ │
+│  │ │ │ │ Discord │  │ Thread manager  │                 │ │   │ │
+│  │ │ │ │ client  │  │ (per-channel)   │                 │ │   │ │
+│  │ │ │ └─────────┘  └─────────────────┘                 │ │   │ │
+│  │ │ └──────────────────────────────────────────────────┘ │   │ │
+│  │ └─────────────────────────────────────────────────────────┘ │
+│  └───────────────────────────────────────────────────────────────┘ │
+│                                                                     │
+│  ┌───────────────────────────────────────────────────────────────┐ │
+│  │ thetis-gateway-whatsapp.service                               │ │
+│  │ ┌─────────────────────────────────────────────────────────┐   │ │
+│  │ │ pi --mode rpc --name "gateway-whatsapp"                 │   │ │
+│  │ │ GATEWAY_PLATFORM=whatsapp                               │   │ │
+│  │ │ ┌────────────────────────────────────────────────────┐ │   │ │
+│  │ │ │ thetis-gateway extension (WhatsApp only)          │ │   │ │
+│  │ │ │ ┌─────────┐  ┌─────────────────┐                 │ │   │ │
+│  │ │ │ │WhatsApp │  │ Thread manager  │                 │ │   │ │
+│  │ │ │ │ client  │  │ (per-channel)   │                 │ │   │ │
+│  │ │ │ └─────────┘  └─────────────────┘                 │ │   │ │
+│  │ │ └──────────────────────────────────────────────────┘ │   │ │
+│  │ └─────────────────────────────────────────────────────────┘ │
+│  └───────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Autres commandes slash depuis les gateways
@@ -345,7 +382,7 @@ En résumé : les commandes qui produisent du texte fonctionnent, celles qui mod
 ## Fichiers
 
 ```
-thetis-gateway/
+thetis-gateway/                          # Repo git (code uniquement)
 ├── index.ts              # Extension principale
 ├── package.json          # Dépendances
 ├── README.md             # Documentation
@@ -353,12 +390,21 @@ thetis-gateway/
 ├── .gitignore            # Fichiers ignorés par Git
 ├── .env.example          # Variables d'environnement
 ├── systemd/
-│   └── pi-gateway.service # Définition service systemd
+│   ├── pi-gateway-discord.service  # Service Discord
+│   └── pi-gateway-whatsapp.service # Service WhatsApp
 ├── scripts/
-│   ├── pi-rpc-wrapper.sh  # Wrapper mode RPC
-│   └── install-boot.sh    # Installation systemd
-└── threads/              # Historique des conversations (auto, ignoré par Git)
+│   ├── pi-rpc-wrapper.sh  # Wrapper mode RPC (accepte discord/whatsapp)
+│   └── install-boot.sh    # Installation des deux services systemd
+└── test-*.js / diagnose-*.js  # Scripts de debug
+
+~/.pi/agent/extensions-data/thetis-gateway/   # Données persistantes (hors repo git)
+├── config.json           # Configuration runtime
+├── threads/              # Historique des conversations (auto, ignoré par Git)
+├── files/                # Fichiers uploadés
+└── .baileys_auth_<sessionName>/  # Credentials WhatsApp
 ```
+
+> **Note** : les données persistantes (config, threads, auth WhatsApp) sont stockées dans `~/.pi/agent/extensions-data/thetis-gateway/` en dehors du repo git. Cela permet de survivre aux mises à jour via `pi update --extension` qui exécute `git clean -fdx`. Une migration automatique est effectuée au premier chargement si des données existent encore dans l'ancien emplacement.
 
 ## Licence
 
