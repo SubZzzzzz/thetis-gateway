@@ -192,6 +192,10 @@ interface ChannelThread {
   processing: boolean;
   pendingMessageId?: string;
   typingInterval?: NodeJS.Timeout;
+  retryCount?: number;
+  maxRetries?: number;
+  lastUserMessage?: { text: string; images?: any[] };
+  retryTimer?: NodeJS.Timeout;
 }
 
 const threads = new Map<string, ChannelThread>();
@@ -254,6 +258,8 @@ function getOrCreateThread(platform: "discord" | "whatsapp", channelId: string):
       messages: loadThreadHistory(id),
       pendingQueue: [],
       processing: false,
+      retryCount: 0,
+      maxRetries: 5,
     };
     threads.set(id, thread);
   }
@@ -1114,7 +1120,7 @@ interface GatewayRuntimeState {
 
 const runtimeState: GatewayRuntimeState = {
   discord: { fatalError: null },
-  whatsapp: { fatalError: null, reconnectAttempts: 0, maxReconnectAttempts: 3 },
+  whatsapp: { fatalError: null, reconnectAttempts: 0, maxReconnectAttempts: 50 },
 };
 
 function resetGatewayRuntimeState() {
@@ -1335,13 +1341,18 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
 
         runtimeState.whatsapp.reconnectAttempts++;
         if (runtimeState.whatsapp.reconnectAttempts > runtimeState.whatsapp.maxReconnectAttempts) {
-          runtimeState.whatsapp.fatalError = `Connection failed after ${runtimeState.whatsapp.maxReconnectAttempts} attempts (${lastDisconnect?.error?.message || "unknown error"})`;
-          ctx.ui.notify(`WhatsApp fatal error: ${runtimeState.whatsapp.fatalError}`, "error");
+          // Last resort: exit the process so systemd restarts it cleanly
+          ctx.ui.notify(`WhatsApp: ${runtimeState.whatsapp.maxReconnectAttempts} failed attempts — exiting for systemd restart.`, "error");
+          setTimeout(() => process.exit(1), 2000);
           return;
         }
 
-        ctx.ui.notify(`WhatsApp closed (attempt ${runtimeState.whatsapp.reconnectAttempts}/${runtimeState.whatsapp.maxReconnectAttempts}) — will retry in 5s.`, "warning");
-        setTimeout(() => startWhatsApp(pi, ctx), 5000);
+        // Exponential backoff: 5s → 15s → 45s → 2min → 5min (capped)
+        const baseDelay = 5000;
+        const delay = Math.min(baseDelay * Math.pow(3, runtimeState.whatsapp.reconnectAttempts - 1), 300000);
+        const delaySec = Math.round(delay / 1000);
+        ctx.ui.notify(`WhatsApp closed (attempt ${runtimeState.whatsapp.reconnectAttempts}) — retry in ${delaySec}s.`, "warning");
+        setTimeout(() => startWhatsApp(pi, ctx), delay);
       } else if (connection === "open") {
         runtimeState.whatsapp.reconnectAttempts = 0;
         // Clear the QR widget now that the device is paired.
@@ -1508,8 +1519,17 @@ async function processThreadQueue(pi: ExtensionAPI, thread: ChannelThread) {
   if (thread.processing) return;
   thread.processing = true;
 
+  // Clear any pending retry timer when new messages arrive
+  if (thread.retryTimer) {
+    clearTimeout(thread.retryTimer);
+    thread.retryTimer = undefined;
+  }
+
   while (thread.pendingQueue.length > 0) {
     const item = thread.pendingQueue.shift()!;
+
+    // Store the message for potential retry
+    thread.lastUserMessage = { text: item.text, images: item.images };
 
     try {
       if (item.images && item.images.length > 0) {
@@ -2089,6 +2109,44 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
       .replace(/<think[\s\S]*?<\/think>/gi, "")
       .replace(/<thinking[\s\S]*?<\/thinking>/gi, "")
       .trim();
+
+    // Check for API errors and retry
+    const stopReason = (event.message as any).stopReason;
+    if (stopReason === "error" && !cleanedText && !attachments.length) {
+      const thread = threads.get(currentThreadId!);
+      if (thread && thread.lastUserMessage && (thread.retryCount ?? 0) < (thread.maxRetries ?? 5)) {
+        thread.retryCount = (thread.retryCount ?? 0) + 1;
+        const delayMs = Math.min(2000 * Math.pow(2, thread.retryCount - 1), 30000);
+        const delaySec = Math.round(delayMs / 1000);
+        
+        // Notify user
+        await routeAssistantReply(pi, `⚠️ Erreur IA — tentative ${thread.retryCount}/${thread.maxRetries} dans ${delaySec}s...`);
+        
+        // Schedule retry
+        thread.retryTimer = setTimeout(() => {
+          if (thread.lastUserMessage) {
+            if (thread.lastUserMessage.images && thread.lastUserMessage.images.length > 0) {
+              const content = [{ type: "text", text: thread.lastUserMessage.text }, ...thread.lastUserMessage.images];
+              pi.sendUserMessage(content as any, { deliverAs: "followUp" });
+            } else {
+              pi.sendUserMessage(thread.lastUserMessage.text, { deliverAs: "followUp" });
+            }
+          }
+        }, delayMs);
+        return;
+      } else {
+        // Give up - reset retry count
+        if (thread) thread.retryCount = 0;
+        await routeAssistantReply(pi, "❌ Erreur IA persistante. Réessayez plus tard.");
+        return;
+      }
+    }
+
+    // Reset retry count on successful response
+    if (currentThreadId) {
+      const thread = threads.get(currentThreadId);
+      if (thread) thread.retryCount = 0;
+    }
 
     if (cleanedText) await routeAssistantReply(pi, cleanedText, attachments);
     else if (attachments.length) await routeAssistantReply(pi, "(image)", attachments);
