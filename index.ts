@@ -2214,6 +2214,133 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
     activeCtx = null;
   });
 
+  /* ----  Tool: gateway_send_file (send a file to the user)  ---- */
+  pi.registerTool({
+    name: "gateway_send_file",
+    label: "Send File via Gateway",
+    description:
+      "Envoie un fichier à l'utilisateur via la gateway active (WhatsApp ou Discord). Utilisez cet outil pour renvoyer un fichier traité, généré ou sauvegardé.",
+    promptGuidelines: [
+      "Use gateway_send_file to send a file to the user when they ask for a file, when you've generated a file, or when you need to return a processed document.",
+      "Provide the absolute path to the file. You can optionally provide a caption/description.",
+      "Supported file types: any (PDF, DOCX, images, text files, etc.)",
+    ],
+    parameters: Type.Object({
+      path: Type.String({ description: "Chemin absolu ou relatif vers le fichier à envoyer" }),
+      caption: Type.Optional(Type.String({ description: "Légende ou description du fichier (optionnel)" })),
+      deleteAfterSend: Type.Optional(Type.Boolean({ description: "Supprimer le fichier après l'envoi (défaut: false)" })),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      if (!currentThreadId) {
+        return {
+          content: [{ type: "text", text: "Erreur : aucun thread gateway actif." }],
+          details: { sent: false, error: "no_active_thread" },
+          isError: true,
+        };
+      }
+
+      const thread = threads.get(currentThreadId);
+      if (!thread) {
+        return {
+          content: [{ type: "text", text: "Erreur : thread actif introuvable." }],
+          details: { sent: false, error: "thread_not_found" },
+          isError: true,
+        };
+      }
+
+      // Resolve path
+      let filePath = params.path;
+      if (!path.isAbsolute(filePath)) {
+        filePath = path.join(process.cwd(), filePath);
+      }
+
+      // Check file exists
+      if (!fs.existsSync(filePath)) {
+        return {
+          content: [{ type: "text", text: `Erreur : fichier introuvable : ${filePath}` }],
+          details: { sent: false, error: "file_not_found", path: filePath },
+          isError: true,
+        };
+      }
+
+      // Read file
+      let fileBuffer: Buffer;
+      try {
+        fileBuffer = fs.readFileSync(filePath);
+      } catch (e: any) {
+        return {
+          content: [{ type: "text", text: `Erreur lors de la lecture du fichier : ${e.message}` }],
+          details: { sent: false, error: "read_error", path: filePath },
+          isError: true,
+        };
+      }
+
+      const fileName = path.basename(filePath);
+      const ext = path.extname(filePath).toLowerCase().slice(1);
+
+      // Guess MIME type from extension
+      const mimeMap: Record<string, string> = {
+        pdf: "application/pdf",
+        doc: "application/msword",
+        docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        xls: "application/vnd.ms-excel",
+        xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ppt: "application/vnd.ms-powerpoint",
+        pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        txt: "text/plain",
+        md: "text/markdown",
+        json: "application/json",
+        csv: "text/csv",
+        html: "text/html",
+        png: "image/png",
+        jpg: "image/jpeg",
+        jpeg: "image/jpeg",
+        gif: "image/gif",
+        webp: "image/webp",
+        svg: "image/svg+xml",
+        zip: "application/zip",
+        gz: "application/gzip",
+        tar: "application/x-tar",
+        mp3: "audio/mpeg",
+        mp4: "video/mp4",
+        wav: "audio/wav",
+        ogg: "audio/ogg",
+      };
+      const contentType = mimeMap[ext] || "application/octet-stream";
+
+      const caption = params.caption || "";
+
+      try {
+        if (thread.platform === "discord") {
+          await sendDiscordReply(thread.channelId, caption, [{ name: fileName, data: fileBuffer, contentType }]);
+        } else if (thread.platform === "whatsapp") {
+          await sendWhatsAppReply(thread.channelId, caption, [{ name: fileName, data: fileBuffer, contentType }]);
+        }
+
+        // Delete file after sending if requested
+        if (params.deleteAfterSend) {
+          try {
+            fs.unlinkSync(filePath);
+          } catch (e: any) {
+            console.error(`Failed to delete file after sending: ${e.message}`);
+          }
+        }
+
+        return {
+          content: [{ type: "text", text: `✅ Fichier envoyé${params.deleteAfterSend ? " et supprimé" : ""} : ${fileName} (${(fileBuffer.length / 1024).toFixed(1)} KB)` }],
+          details: { sent: true, path: filePath, fileName, size: fileBuffer.length, contentType, deleted: params.deleteAfterSend },
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text", text: `Erreur lors de l'envoi du fichier : ${e.message}` }],
+          details: { sent: false, error: "send_error", path: filePath },
+          isError: true,
+        };
+      }
+    },
+  });
+
   /* ----  System Prompt Injection  ---- */
   pi.on("before_agent_start", async (event, _ctx) => {
     let injection = "";
@@ -2230,6 +2357,7 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
         fileInstruction += " Pour les PDF, utilisez `bash` avec `pdftotext <chemin> -` pour extraire le texte. Si pdftotext n'est pas installé, utilisez `apt install poppler-utils`.";
       }
       fileInstruction += " Vous pouvez utiliser `read` ou `bash` pour accéder aux fichiers sauvegardés.";
+      fileInstruction += " Pour renvoyer un fichier à l'utilisateur, utilisez le tool `gateway_send_file` avec le chemin du fichier. Utilisez `deleteAfterSend: true` si le fichier est temporaire.";
       injection += fileInstruction;
     }
 
