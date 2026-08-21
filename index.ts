@@ -908,7 +908,25 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
       if (message.attachments?.size > 0) {
         for (const [, att] of message.attachments) {
           if (att.contentType?.startsWith("image/")) {
-            attachments.push({ type: "image", source: { type: "url", url: att.url } });
+            // Discord peut servir des images en WebP — convertir en JPEG si nécessaire
+            if (att.contentType === "image/webp") {
+              try {
+                const sharp = require("sharp");
+                const response = await fetch(att.url);
+                if (response.ok) {
+                  const imgBuffer = Buffer.from(await response.arrayBuffer());
+                  const jpegBuffer = await sharp(imgBuffer).jpeg({ quality: 90 }).toBuffer();
+                  const b64 = jpegBuffer.toString("base64");
+                  attachments.push({ type: "image", source: { type: "base64", mediaType: "image/jpeg", data: b64 } });
+                } else {
+                  attachments.push({ type: "image", source: { type: "url", url: att.url } });
+                }
+              } catch {
+                attachments.push({ type: "image", source: { type: "url", url: att.url } });
+              }
+            } else {
+              attachments.push({ type: "image", source: { type: "url", url: att.url } });
+            }
           } else if (att.size < 500_000 && isTextFile(att.name)) {
             try {
               const response = await fetch(att.url);
@@ -1477,7 +1495,16 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
             else if (msg.message.documentMessage) mediaType = msg.message.documentMessage.mimetype || "application/octet-stream";
 
             if (mediaType.startsWith("image/")) {
-              attachments.push({ type: "image", source: { type: "base64", mediaType, data: b64 } });
+              let finalBuffer = buffer;
+              let finalMediaType = mediaType;
+              // Convertir WebP en JPEG (seul format non supporté par les providers IA)
+              if (mediaType === "image/webp") {
+                const sharp = require("sharp");
+                finalBuffer = await sharp(buffer).jpeg({ quality: 90 }).toBuffer();
+                finalMediaType = "image/jpeg";
+              }
+              const finalB64 = Buffer.from(finalBuffer).toString("base64");
+              attachments.push({ type: "image", source: { type: "base64", mediaType: finalMediaType, data: finalB64 } });
             } else if (mediaType.startsWith("text/") || isTextFile(msg.message.documentMessage?.fileName || "")) {
               const content = buffer.toString("utf8");
               text += `\n\n--- File: ${msg.message.documentMessage?.fileName || "attachment"} ---\n\`\`\`\n${content.slice(0, 8000)}\n\`\`\``;
