@@ -17,6 +17,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { registerReadPdfTool } from "./read-pdf";
 // NOTE: @earendil-works/pi-tui (Container, Text) is imported dynamically
 // below to avoid TypeScript resolution issues — pi's module loader resolves
 // it at runtime, but it's not a direct dependency in the extension's
@@ -2466,6 +2467,9 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
     activeCtx = null;
   });
 
+  /* ----  Tool: read_pdf (extract text from PDFs with OCR + chunking)  ---- */
+  registerReadPdfTool(pi);
+
   /* ----  Tool: gateway_send_file (send a file to the user)  ---- */
   pi.registerTool({
     name: "gateway_send_file",
@@ -2606,9 +2610,9 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
     if (hasFileMention) {
       let fileInstruction = "\n\nIMPORTANT : Des fichiers ont été sauvegardés sur le disque.";
       if (event.prompt.includes(".pdf")) {
-        fileInstruction += " Pour les PDF, utilisez `bash` avec `pdftotext <chemin> -` pour extraire le texte. Si pdftotext n'est pas installé, utilisez `apt install poppler-utils`.";
+        fileInstruction += "\n\n🚨 PDF DÉTECTÉ — Utilisez UNIQUEMENT le tool `read_pdf` pour lire les PDF. N'utilisez JAMAIS `pdftotext`, `pdftoppm`, `tesseract` ou tout autre commande manuelle. `read_pdf` gère automatiquement l'extraction texte, l'OCR fallback, et le chunking pour ne pas surcharger le contexte.";
       }
-      fileInstruction += " Vous pouvez utiliser `read` ou `bash` pour accéder aux fichiers sauvegardés.";
+      fileInstruction += " Vous pouvez utiliser `read` ou `bash` pour accéder aux autres fichiers sauvegardés.";
       fileInstruction += " Pour renvoyer un fichier à l'utilisateur, utilisez le tool `gateway_send_file` avec le chemin du fichier. Utilisez `deleteAfterSend: true` si le fichier est temporaire.";
       injection += fileInstruction;
     }
