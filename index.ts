@@ -204,6 +204,10 @@ interface ChannelThread {
   lastErrorMessage?: string; // For deduplication
   lastErrorTimestamp?: number; // Timestamp of last error
   lastProcessedMessage?: { text: string; images?: any[]; timestamp: number }; // For message deduplication
+  hasFatalContextError?: boolean; // True when an error is caused by message content (e.g. invalid image). Blocks retries until a clean message is sent.
+  piExhaustedRetries?: boolean; // True when agent_end fires with willRetry=false (pi's System A done)
+  errorMessagesSent?: number; // Error messages sent per episode (max 3 visible)
+  errorEpisodeActive?: boolean; // True during an error episode — prevents "stop" from resetting counters
 }
 
 const threads = new Map<string, ChannelThread>();
@@ -274,6 +278,10 @@ function getOrCreateThread(platform: "discord" | "whatsapp", channelId: string):
       lastErrorMessage: undefined,
       lastErrorTimestamp: undefined,
       lastProcessedMessage: undefined,
+      hasFatalContextError: false,
+      piExhaustedRetries: false,
+      errorMessagesSent: 0,
+      errorEpisodeActive: false,
     };
     threads.set(id, thread);
   }
@@ -944,10 +952,17 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
         }
       }
 
+      // Check for stop keywords — cancel retries instead of processing as normal message
+      const fullTextForStopCheck = (text || "(attachment)") + fileContentText;
+      if (isStopKeyword(fullTextForStopCheck)) {
+        await handleStopKeyword(thread, pi);
+        return;
+      }
+
       // Show thinking indicator
       await startThinkingIndicator(thread);
 
-      const fullText = (text || "(attachment)") + fileContentText;
+      const fullText = fullTextForStopCheck;
       // Queue the message
       thread.pendingQueue.push({ text: fullText, images: attachments.length ? attachments : undefined });
       thread.messages.push({ role: "user", text: fullText.slice(0, 10000), timestamp: Date.now(), hasImage: attachments.length > 0 });
@@ -1527,6 +1542,13 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
       }
 
       const fullText = text || "(attachment)";
+
+      // Check for stop keywords — cancel retries instead of processing as normal message
+      if (isStopKeyword(fullText)) {
+        await handleStopKeyword(thread, pi);
+        return;
+      }
+
       thread.pendingQueue.push({ text: fullText, images: attachments.length ? attachments : undefined });
       thread.messages.push({ role: "user", text: fullText.slice(0, 10000), timestamp: Date.now(), hasImage: attachments.length > 0 });
       saveThreadHistory(getThreadId("whatsapp", jid), thread.messages);
@@ -1547,6 +1569,49 @@ async function stopWhatsApp(ctx: ExtensionContext) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Stop keyword detection                                             */
+/* ------------------------------------------------------------------ */
+
+const STOP_KEYWORDS = new Set(["stop", "annuler", "annule", "cancel", "arrête", "arrête tout", "stop tout"]);
+
+function isStopKeyword(text: string): boolean {
+  const trimmed = text.trim().toLowerCase();
+  return STOP_KEYWORDS.has(trimmed);
+}
+
+/**
+ * Handle a stop keyword: cancel retries, reset state, clean image context.
+ * Returns true if the message was a stop keyword and was handled.
+ */
+async function handleStopKeyword(
+  thread: ChannelThread,
+  pi: ExtensionAPI
+): Promise<boolean> {
+  // Cancel any pending retry timer
+  if (thread.retryTimer) {
+    clearTimeout(thread.retryTimer);
+    thread.retryTimer = undefined;
+  }
+
+  // Reset all retry/error state
+  thread.isProcessingRetry = false;
+  thread.retryCount = 0;
+  thread.errorCycles = 0;
+  thread.hasFatalContextError = false;
+  thread.lastUserMessage = undefined;
+
+  // Clear pending queue to prevent stale messages from being processed
+  thread.pendingQueue.length = 0;
+  thread.processing = false;
+
+  // Send confirmation
+  await replyToThread(thread, "✅ Opération annulée.");
+
+  console.log(`[thetis-gateway] Stop keyword received — retries cancelled, context cleaned`);
+  return true;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Thread Queue Processor                                             */
 /* ------------------------------------------------------------------ */
 
@@ -1559,6 +1624,11 @@ async function processThreadQueue(pi: ExtensionAPI, thread: ChannelThread) {
     clearTimeout(thread.retryTimer);
     thread.retryTimer = undefined;
   }
+
+  // Reset error episode state for new user interaction
+  // (circuitBreakerUntil and errorCycles are preserved — only the per-episode message counter resets)
+  thread.errorEpisodeActive = false;
+  thread.errorMessagesSent = 0;
 
   while (thread.pendingQueue.length > 0) {
     const item = thread.pendingQueue.shift()!;
@@ -1573,6 +1643,21 @@ async function processThreadQueue(pi: ExtensionAPI, thread: ChannelThread) {
     if (isDuplicate) {
       console.log(`[thetis-gateway] Skipping duplicate message (processed ${((now - thread.lastProcessedMessage!.timestamp) / 1000).toFixed(0)}s ago)`);
       continue;
+    }
+
+    // hasFatalContextError check: if the previous error was caused by content (e.g. invalid image),
+    // block messages that contain images/files until a clean text-only message is sent.
+    if (thread.hasFatalContextError) {
+      if (item.images && item.images.length > 0) {
+        // User sent another image while flag is active — reject it
+        console.log(`[thetis-gateway] Blocking message: hasFatalContextError is active and message contains images`);
+        await replyToThread(thread, "❌ Le format du fichier envoyé n'est pas supporté. Veuillez essayer avec un autre format (JPG, PNG) ou envoyer un message texte.");
+        continue;
+      } else {
+        // User sent a clean text message — reset the flag and proceed
+        console.log(`[thetis-gateway] hasFatalContextError reset: user sent a clean text message`);
+        thread.hasFatalContextError = false;
+      }
     }
 
     // Store the message for potential retry and deduplication
@@ -2251,6 +2336,23 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
     }
   });
 
+  /* ----  Track pi's internal retry state (System A)  ---- */
+  pi.on("agent_start", async () => {
+    if (!currentThreadId) return;
+    const thread = threads.get(currentThreadId);
+    if (thread) thread.piExhaustedRetries = false;
+  });
+
+  pi.on("agent_end", async (event) => {
+    if (!currentThreadId) return;
+    const thread = threads.get(currentThreadId);
+    if (!thread) return;
+    if ((event as any).willRetry === false) {
+      thread.piExhaustedRetries = true;
+      console.log(`[thetis-gateway] Pi agent run ended — willRetry=false (System A exhausted)`);
+    }
+  });
+
   /* ----  Capture assistant replies and route them  ---- */
   pi.on("message_end", async (event) => {
     if (event.message.role !== "assistant") return;
@@ -2287,138 +2389,120 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
       .replace(/<thinking[\s\S]*?<\/thinking>/gi, "")
       .trim();
 
-    // Check for API errors and retry with improved error handling
+    // Check for API errors — NO gateway retry (pi already handles auto_retry internally)
+    // Pi's System A does up to 3 auto_retries transparently before message_end fires.
+    // The gateway's System B retry was creating infinite loops (each gateway retry → 3 new pi auto_retries).
     const stopReason = (event.message as any).stopReason;
     if (stopReason === "error" && !cleanedText && !attachments.length) {
       const thread = threads.get(currentThreadId!);
       if (!thread) return;
 
-      // Extract error message for classification
       const errorText = text || "Unknown error";
-
-      // Classify error type
       const errorType = classifyError(errorText);
       console.log(`[thetis-gateway] Error classified as: ${errorType} - ${errorText.slice(0, 200)}`);
 
-      // Check circuit breaker
-      const now = Date.now();
-      if (thread.circuitBreakerUntil && now < thread.circuitBreakerUntil) {
-        const waitTime = Math.ceil((thread.circuitBreakerUntil - now) / 1000);
-        await routeAssistantReply(pi, `⚠️ Service temporairement indisponible. Réessayez dans ${waitTime}s.`);
-        return;
+      // Fatal context error: strip images to prevent retry loop on bad content
+      const errorLower = errorText.toLowerCase();
+      const isContentError = errorType === "client_error" && (
+        errorLower.includes("image format") ||
+        errorLower.includes("invalid_parameter") ||
+        errorLower.includes("cannot be opened") ||
+        errorLower.includes("illegal") ||
+        errorLower.includes("400")
+      );
+
+      if (isContentError && thread.lastUserMessage?.images && thread.lastUserMessage.images.length > 0) {
+        console.log(`[thetis-gateway] Fatal context error: stripping images from lastUserMessage`);
+        thread.lastUserMessage = { text: thread.lastUserMessage.text, images: undefined };
+        thread.hasFatalContextError = true;
       }
 
-      // If this is a retry attempt, don't trigger another retry loop
-      if (thread.isProcessingRetry) {
-        thread.isProcessingRetry = false;
-        thread.retryCount = (thread.retryCount ?? 0) + 1;
-        console.log(`[thetis-gateway] Retry attempt ${thread.retryCount} failed`);
+      const now = Date.now();
 
-        // Update error cycle tracking
-        thread.lastErrorTimestamp = now;
-        thread.lastErrorMessage = errorText;
-
-        // Determine max retries based on error type
-        const maxRetriesForError = getMaxRetriesForErrorType(errorType);
-
-        if (thread.retryCount >= maxRetriesForError) {
-          // Max retries reached for this error type
-          thread.errorCycles = (thread.errorCycles ?? 0) + 1;
-          console.log(`[thetis-gateway] Error cycle ${thread.errorCycles} completed`);
-
-          // Check if we need to activate circuit breaker (3 consecutive cycles = 15 total failures)
-          if (thread.errorCycles >= 3) {
-            thread.circuitBreakerUntil = now + 600_000; // 10 minutes
-            thread.errorCycles = 0; // Reset cycle counter
-            console.log(`[thetis-gateway] Circuit breaker activated until ${new Date(thread.circuitBreakerUntil).toISOString()}`);
-            await routeAssistantReply(pi, "❌ Trop d'erreurs consécutives. Service bloqué pendant 10 minutes.");
-          } else {
-            await routeAssistantReply(pi, `❌ Erreur IA persistante (${errorType}). Réessayez plus tard.`);
-          }
-          thread.retryCount = 0;
-        } else {
-          // Continue retrying
-          const delayMs = Math.min(2000 * Math.pow(2, thread.retryCount - 1), 30000);
-          const delaySec = Math.round(delayMs / 1000);
-
-          await routeAssistantReply(pi, `⚠️ Erreur IA (${errorType}) — tentative ${thread.retryCount + 1}/${maxRetriesForError} dans ${delaySec}s...`);
-
-          // Mark as retry to prevent loop
-          thread.isProcessingRetry = true;
-          thread.retryTimer = setTimeout(() => {
-            thread.isProcessingRetry = false; // Reset before sending
-            if (thread.lastUserMessage) {
-              if (thread.lastUserMessage.images && thread.lastUserMessage.images.length > 0) {
-                const content = [{ type: "text", text: thread.lastUserMessage.text }, ...thread.lastUserMessage.images];
-                pi.sendUserMessage(content as any, { deliverAs: "followUp" });
-              } else {
-                pi.sendUserMessage(thread.lastUserMessage.text, { deliverAs: "followUp" });
-              }
-            }
-          }, delayMs);
+      // ── 1. CIRCUIT BREAKER — checked FIRST, before any other logic ──
+      if (thread.circuitBreakerUntil && now < thread.circuitBreakerUntil) {
+        const waitTime = Math.ceil((thread.circuitBreakerUntil - now) / 1000);
+        // Respect error message limit even for circuit breaker messages
+        if ((thread.errorMessagesSent ?? 0) < 3) {
+          await routeAssistantReply(pi, `⚠️ Service temporairement indisponible. Réessayez dans ${waitTime}s.`);
+          thread.errorMessagesSent = (thread.errorMessagesSent ?? 0) + 1;
         }
         return;
       }
 
-      // First error occurrence - check if we should retry
-      const maxRetriesForError = getMaxRetriesForErrorType(errorType);
-
-      if (maxRetriesForError === 0) {
-        // Non-retryable error (429, 402, etc.)
-        thread.retryCount = 0;
-        await routeAssistantReply(pi, `❌ ${getErrorMessageForErrorType(errorType)}`);
-        return;
+      // ── 2. Pi exhausted its auto_retries (System A) — do NOT gateway-retry ──
+      // message_end with stopReason="error" only fires after pi's internal auto_retries
+      // complete. Retrying from the gateway would trigger a NEW agent run → more auto_retries
+      // → infinite loop (1686 auto_retry_start in 2 days). So we just send ONE error message.
+      if (thread.piExhaustedRetries) {
+        console.log(`[thetis-gateway] Pi exhausted retries (agent_end willRetry=false) — skipping gateway retry`);
       }
 
-      if ((thread.retryCount ?? 0) < maxRetriesForError && thread.lastUserMessage) {
-        thread.retryCount = (thread.retryCount ?? 0) + 1;
-        const delayMs = Math.min(2000 * Math.pow(2, thread.retryCount - 1), 30000);
-        const delaySec = Math.round(delayMs / 1000);
+      // ── 3. Mark error episode as active ──
+      thread.errorEpisodeActive = true;
 
-        await routeAssistantReply(pi, `⚠️ Erreur IA (${errorType}) — tentative ${thread.retryCount}/${maxRetriesForError} dans ${delaySec}s...`);
-
-        // Mark as retry to prevent loop
-        thread.isProcessingRetry = true;
-        thread.retryTimer = setTimeout(() => {
-          thread.isProcessingRetry = false; // Reset before sending
-          if (thread.lastUserMessage) {
-            if (thread.lastUserMessage.images && thread.lastUserMessage.images.length > 0) {
-              const content = [{ type: "text", text: thread.lastUserMessage.text }, ...thread.lastUserMessage.images];
-              pi.sendUserMessage(content as any, { deliverAs: "followUp" });
-            } else {
-              pi.sendUserMessage(thread.lastUserMessage.text, { deliverAs: "followUp" });
-            }
-          }
-        }, delayMs);
-        return;
-      } else {
-        // Give up - increment error cycle counter
+      // ── 4. Error message limit — max 3 visible messages per episode ──
+      if ((thread.errorMessagesSent ?? 0) >= 3) {
+        console.log(`[thetis-gateway] Error message limit reached (3/3), staying silent`);
+        // Still track error cycles for circuit breaker even when silent
         thread.errorCycles = (thread.errorCycles ?? 0) + 1;
         thread.lastErrorTimestamp = now;
         thread.lastErrorMessage = errorText;
-        console.log(`[thetis-gateway] Error cycle ${thread.errorCycles} completed (gave up)`);
-
-        // Check if we need to activate circuit breaker
         if (thread.errorCycles >= 3) {
-          thread.circuitBreakerUntil = now + 600_000; // 10 minutes
+          thread.circuitBreakerUntil = now + 600_000;
           thread.errorCycles = 0;
           console.log(`[thetis-gateway] Circuit breaker activated until ${new Date(thread.circuitBreakerUntil).toISOString()}`);
-          await routeAssistantReply(pi, "❌ Trop d'erreurs consécutives. Service bloqué pendant 10 minutes.");
-        } else {
-          await routeAssistantReply(pi, `❌ Erreur IA persistante (${errorType}). Réessayez plus tard.`);
         }
         thread.retryCount = 0;
+        thread.isProcessingRetry = false;
         return;
       }
+
+      // ── 5. Send ONE error message — NO gateway retry ──
+      const nonRetryableTypes: ErrorType[] = ["rate_limit", "payment_required", "client_error"];
+
+      if (nonRetryableTypes.includes(errorType)) {
+        await routeAssistantReply(pi, `❌ ${getErrorMessageForErrorType(errorType)}`);
+      } else {
+        // server_error, network_error, unknown — pi already retried internally
+        await routeAssistantReply(pi, `❌ Erreur IA (${errorType}). Réessayez plus tard.`);
+      }
+      thread.errorMessagesSent = (thread.errorMessagesSent ?? 0) + 1;
+
+      // ── 6. Update error cycle tracking for circuit breaker ──
+      thread.errorCycles = (thread.errorCycles ?? 0) + 1;
+      thread.lastErrorTimestamp = now;
+      thread.lastErrorMessage = errorText;
+
+      if (thread.errorCycles >= 3) {
+        thread.circuitBreakerUntil = now + 600_000; // 10 minutes
+        thread.errorCycles = 0;
+        console.log(`[thetis-gateway] Circuit breaker activated until ${new Date(thread.circuitBreakerUntil).toISOString()}`);
+      }
+
+      thread.retryCount = 0;
+      thread.isProcessingRetry = false;
+      // Clear any pending retry timer from previous cycles
+      if (thread.retryTimer) {
+        clearTimeout(thread.retryTimer);
+        thread.retryTimer = undefined;
+      }
+      return;
     }
 
-    // Reset retry count and error state on successful response
+    // Reset retry state on successful response — but preserve error counters during error episodes
+    // This prevents "stop" (which succeeds) from resetting errorCycles/circuitBreaker
     if (currentThreadId) {
       const thread = threads.get(currentThreadId);
       if (thread) {
         thread.retryCount = 0;
-        thread.errorCycles = 0; // Reset error cycles on success
         thread.isProcessingRetry = false;
+        // Only reset error cycles if NOT in an active error episode
+        // (errorEpisodeActive is reset by processThreadQueue on new user messages)
+        if (!thread.errorEpisodeActive) {
+          thread.errorCycles = 0;
+          thread.errorMessagesSent = 0;
+        }
       }
     }
 
