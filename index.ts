@@ -177,6 +177,41 @@ function clearAllThreadHistories(): void {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/*  Files cleanup — remove uploaded files older than 24h               */
+/* ------------------------------------------------------------------ */
+
+const FILES_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function cleanupFilesDir(): void {
+  if (!fs.existsSync(FILES_DIR)) return;
+  const now = Date.now();
+  let cleaned = 0;
+  try {
+    for (const entry of fs.readdirSync(FILES_DIR, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const filePath = path.join(FILES_DIR, entry.name);
+      try {
+        const stat = fs.statSync(filePath);
+        if (now - stat.mtimeMs > FILES_MAX_AGE_MS) {
+          fs.unlinkSync(filePath);
+          cleaned++;
+        }
+      } catch {
+        // ignore individual file errors
+      }
+    }
+  } catch {
+    // ignore directory read errors
+  }
+  if (cleaned > 0) {
+    console.log(`[thetis-gateway] Cleaned up ${cleaned} stale file(s) from FILES_DIR`);
+  }
+}
+
+// Periodic cleanup every hour
+setInterval(cleanupFilesDir, 60 * 60 * 1000);
+
 interface ThreadMessage {
   role: "user" | "assistant";
   text: string;
@@ -2616,6 +2651,9 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (event, ctx) => {
     activeCtx = ctx;
     resetGatewayRuntimeState();
+
+    // Clean up stale uploaded files on session start
+    cleanupFilesDir();
 
     // Capture current model info at session start
     // This ensures we have the model info for /new confirmation messages
