@@ -28,6 +28,30 @@ if [ -n "$PLATFORM" ]; then
   SESSION_NAME="gateway-$PLATFORM"
 fi
 
-# Run pi in RPC mode with an open stdin so it doesn't exit.
-# 'tail -f /dev/null' provides an open pipe that never produces data.
-exec tail -f /dev/null | pi --mode rpc --name "$SESSION_NAME"
+# Named pipe for IPC (extension writes commands, wrapper sends them to Pi)
+PIPE_FILE="/tmp/thetis-gateway-pipe-${PLATFORM:-default}"
+CMD_FILE="/tmp/thetis-gateway-cmd-${PLATFORM:-default}"
+
+# Clean up old files
+rm -f "$PIPE_FILE" "$CMD_FILE"
+touch "$CMD_FILE"
+
+# Create named pipe
+mkfifo "$PIPE_FILE"
+
+# Keep the pipe open (fd 3)
+exec 3<>"$PIPE_FILE"
+
+# Process that reads command file and writes to pipe
+(
+  while true; do
+    if [ -s "$CMD_FILE" ]; then
+      cat "$CMD_FILE" >&3
+      > "$CMD_FILE"
+    fi
+    sleep 0.1
+  done
+) &
+
+# Run pi in RPC mode reading from the pipe
+exec pi --mode rpc --name "$SESSION_NAME" <&3
