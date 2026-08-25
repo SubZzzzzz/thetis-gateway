@@ -248,10 +248,10 @@ function getGatewayCtx(): ExtensionContext {
 }
 
 let lastActiveThreadId: string | null = null;
-let lastActivePlatform: "discord" | "whatsapp" | null = null;
-let lastActiveChannelId: string | null = null;
 let restartNotified = false;
-let isFreshNewSession = false;
+
+// Track current model info for /new confirmation messages
+let currentModelInfo = { name: "default", provider: "unknown", contextWindow: 128000 };
 // Track IDs of messages we sent so we can ignore their Baileys echoes
 // (every outgoing sendMessage triggers a messages.upsert with fromMe=true).
 const sentMessageIds = new Set<string>();
@@ -639,7 +639,7 @@ const PI_TUI_ONLY_COMMANDS = new Set([
 ]);
 
 const PI_SILENT_COMMANDS = new Set([
-  "new", "reset", "model", "name", "title", "compact", "stop",
+  "new", "model", "name", "title", "compact", "stop",
   "thinking", "fork", "clone", "export", "import", "copy",
   "reload", "reload-mcp", "reload-skills", "learn", "personality",
   "fast", "verbose", "footer", "yolo", "reasoning", "codex-runtime",
@@ -648,6 +648,7 @@ const PI_SILENT_COMMANDS = new Set([
   "tasks", "memory", "skills", "bundles", "suggestions", "blueprint",
   "bp", "curator", "approve", "deny", "platform", "sethome",
   "usage", "credits", "insights", "topic", "retry", "undo",
+  "restart",
 ]);
 
 async function handlePiCommand(
@@ -683,28 +684,112 @@ async function handlePiCommand(
 
   // Silent commands that need gateway confirmation
   if (PI_SILENT_COMMANDS.has(cmd)) {
-    // For /new and /reset, clear the thread history and send to Pi
-    if (cmd === "new" || cmd === "reset") {
+    // For /new, create a real new session via IPC (write to command file)
+    // The wrapper script reads the file and sends the command to Pi via stdin
+    // This avoids sending the command text to the LLM (saves tokens)
+    if (cmd === "new") {
       thread.messages = [];
       saveThreadHistory(getThreadId(thread.platform, thread.channelId), []);
+      
+      // Send confirmation message immediately with current model info
+      const usage = activeCtx?.getContextUsage?.();
+      let tokens = "?";
+      let window = currentModelInfo.contextWindow;
+      let percent = "?";
+      if (usage) {
+        tokens = String(usage.tokens ?? "?");
+        window = usage.contextWindow;
+        percent = usage.percent !== null ? `${usage.percent.toFixed(1)}%` : "?";
+      }
 
-      // Mark as fresh new session so model_select handler displays the info message
-      isFreshNewSession = true;
-      lastActivePlatform = thread.platform;
-      lastActiveChannelId = thread.channelId;
+      const modelName = currentModelInfo.name;
+      const provider = currentModelInfo.provider;
 
-      // Send to Pi to reset the session
-      pi.sendUserMessage(text, { deliverAs: "followUp" });
+      const infoMsg =
+        `🆕 **Nouvelle session**\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `🤖 Modèle : **${modelName}** (${provider})\n` +
+        `📊 Contexte : ${percent} (${tokens} / ${window} tokens)\n` +
+        `🧹 Historique : vidé`;
 
+      if (thread.platform === "discord") {
+        await sendDiscordReply(thread.channelId, infoMsg);
+      } else if (thread.platform === "whatsapp") {
+        await sendWhatsAppReply(thread.channelId, infoMsg);
+      }
+      
+      // Write new_session command to the command file
+      // The wrapper script (pi-rpc-wrapper.sh) reads this and sends it to Pi
+      const platform = process.env.GATEWAY_PLATFORM || "default";
+      const cmdFile = `/tmp/thetis-gateway-cmd-${platform}`;
+      try {
+        fs.appendFileSync(cmdFile, '{"type": "new_session"}\n');
+        console.log(`[thetis-gateway] Wrote new_session command to ${cmdFile}`);
+      } catch (err) {
+        console.error(`[thetis-gateway] Failed to write to ${cmdFile}:`, err);
+      }
+      
+      // DO NOT send to LLM - just return handled
       return { handled: true };
     }
 
-    // Send to pi
-    pi.sendUserMessage(text, { deliverAs: "followUp" });
+    // For /model, use Pi's model API directly instead of sending to LLM
+    if (cmd === "model") {
+      if (args) {
+        // Change model: /model <name>
+        const model = activeCtx?.modelRegistry?.find(null, args) || activeCtx?.modelRegistry?.find(args, null);
+        if (model) {
+          const success = await pi.setModel(model);
+          if (success) {
+            currentModelInfo = {
+              name: model.name ?? model.id ?? args,
+              provider: model.provider ?? "unknown",
+              contextWindow: model.context_window ?? 128000,
+            };
+            await replyToThread(thread, `🤖 Modèle changé : **${currentModelInfo.name}** (${currentModelInfo.provider})`);
+          } else {
+            await replyToThread(thread, `❌ Impossible de changer de modèle (pas de clé API pour ${args})`);
+          }
+        } else {
+          await replyToThread(thread, `❌ Modèle introuvable : ${args}`);
+        }
+      } else {
+        // Show current model: /model
+        const model = activeCtx?.model;
+        const usage = activeCtx?.getContextUsage?.();
+        if (model) {
+          const modelName = model.name ?? model.id ?? "unknown";
+          const provider = model.provider ?? "unknown";
+          const contextWindow = usage?.contextWindow ?? model.context_window ?? 128000;
+          const tokens = usage?.tokens ?? 0;
+          const percent = usage?.percent ?? 0;
+          await replyToThread(thread, `🤖 Modèle actuel : **${modelName}** (${provider})\n📊 Contexte : ${tokens} / ${contextWindow} tokens (${percent.toFixed(1)}%)`);
+        } else {
+          await replyToThread(thread, `🤖 Modèle actuel : ${currentModelInfo.name} (${currentModelInfo.provider})`);
+        }
+      }
+      return { handled: true };
+    }
 
-    // Send immediate confirmation for other silent commands
+    // For /restart, restart ALL gateway services
+    if (cmd === "restart") {
+      // Send confirmation message before restart
+      await replyToThread(thread, `🔄 Redémarrage de tous les gateways en cours...`);
+      
+      // Restart all gateway services
+      const { exec } = await import("child_process");
+      exec(`systemctl --user restart thetis-gateway-discord thetis-gateway-whatsapp 2>/dev/null || true`, (error) => {
+        if (error) {
+          console.error(`[thetis-gateway] Failed to restart gateways:`, error);
+        }
+      });
+      
+      return { handled: true };
+    }
+
+    // For other silent commands, send confirmation and DO NOT send to LLM
+    // This saves tokens by not wasting them on command text
     const confirmations: Record<string, string> = {
-        model: args ? `🤖 Changement de modèle en cours…` : `🤖 Modèle actuel demandé…`,
         name: args ? `🏷️ Nom de session défini : *${args}*` : `🏷️ Nom demandé…`,
         title: args ? `🏷️ Titre défini : *${args}*` : `🏷️ Titre demandé…`,
         compact: `🗜️ Compression du contexte en cours…`,
@@ -760,9 +845,12 @@ async function handlePiCommand(
         retry: `🔄 Retry en cours…`,
         undo: `↩️ Dernier échange supprimé.`,
       };
-      await replyToThread(thread, confirmations[cmd] || `⚡ Commande \`/${cmd}\` exécutée.`);
-      return { handled: true };
-    }
+    
+    await replyToThread(thread, confirmations[cmd] || `⚡ Commande \`/${cmd}\` exécutée.`);
+    
+    // DO NOT send to LLM - just return handled
+    return { handled: true };
+  }
 
   // Let everything else pass through normally (help, whoami, status, etc.)
   return { handled: false, passthrough: text };
@@ -1665,12 +1753,24 @@ async function processThreadQueue(pi: ExtensionAPI, thread: ChannelThread) {
     thread.lastProcessedMessage = { text: item.text, images: item.images, timestamp: now };
 
     try {
+      // Check if this is a Pi command (starts with /)
+      // Commands need to be sent without deliverAs to be processed correctly
+      const isCommand = typeof item.text === 'string' && item.text.startsWith('/');
+      
       if (item.images && item.images.length > 0) {
         // Send as content array with images
         const content = [{ type: "text", text: item.text }, ...item.images];
-        pi.sendUserMessage(content as any, { deliverAs: "followUp" });
+        if (isCommand) {
+          pi.sendUserMessage(content as any);
+        } else {
+          pi.sendUserMessage(content as any, { deliverAs: "followUp" });
+        }
       } else {
-        pi.sendUserMessage(item.text, { deliverAs: "followUp" });
+        if (isCommand) {
+          pi.sendUserMessage(item.text);
+        } else {
+          pi.sendUserMessage(item.text, { deliverAs: "followUp" });
+        }
       }
     } catch {
       // If send fails, re-queue for later
@@ -2511,9 +2611,20 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
   });
 
   /* ----  Session lifecycle  ---- */
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     activeCtx = ctx;
     resetGatewayRuntimeState();
+
+    // Capture current model info at session start
+    // This ensures we have the model info for /new confirmation messages
+    if (ctx.model) {
+      currentModelInfo = {
+        name: ctx.model.name ?? ctx.model.id ?? "default",
+        provider: ctx.model.provider ?? "unknown",
+        contextWindow: ctx.model.context_window ?? 128000,
+      };
+      console.log(`[thetis-gateway] Model captured at session start: ${currentModelInfo.name} (${currentModelInfo.provider}), window=${currentModelInfo.contextWindow}`);
+    }
 
     // Auto-start gateways only when Pi runs as a service (RPC mode).
     // In TUI mode the user must start them manually with /gateway start.
@@ -2532,38 +2643,42 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
         if (isGatewayEnabled("discord")) await startDiscord(pi, ctx);
         if (isGatewayEnabled("whatsapp")) await startWhatsApp(pi, ctx);
       }
+      
+      // Send startup confirmation to all known channels from existing threads
+      const startupMsg = `✅ Gateway redémarré avec succès !`;
+      if (fs.existsSync(THREADS_DIR)) {
+        const threadFiles = fs.readdirSync(THREADS_DIR).filter(f => f.endsWith(".json"));
+        for (const file of threadFiles) {
+          try {
+            const threadId = file.replace(".json", "");
+            const threadData = JSON.parse(fs.readFileSync(path.join(THREADS_DIR, file), "utf8"));
+            // Extract platform and channelId from threadId (format: "platform:channelId")
+            const [threadPlatform, ...channelIdParts] = threadId.split(":");
+            const channelId = channelIdParts.join(":");
+            
+            if (threadPlatform === "discord") {
+              await sendDiscordReply(channelId, startupMsg);
+            } else if (threadPlatform === "whatsapp") {
+              await sendWhatsAppReply(channelId, startupMsg);
+            }
+          } catch (err) {
+            console.error(`[thetis-gateway] Failed to send startup message to thread ${file}:`, err);
+          }
+        }
+      }
     }
 
-    // Reset session tracking (but keep lastActivePlatform/lastActiveChannelId
-    // for model_select to pick up and send the rich session-info message)
     lastActiveThreadId = null;
   });
 
-  /* ----  Model select — notify gateway when model is selected after /new  ---- */
-  pi.on("model_select", async (event, ctx) => {
-    if (!isFreshNewSession) return; // ignore model changes not triggered by /new
-    if (!lastActivePlatform || !lastActiveChannelId) return;
-
-    const modelName = event.model.name ?? "default";
-    const provider = event.model.provider ?? "unknown";
-    const usage = ctx.getContextUsage?.();
-    let infoMsg = `🆕 **Nouvelle session prête**\n🤖 Modèle : **${modelName}** (${provider})`;
-    if (usage) {
-      const tokens = usage.tokens ?? "?";
-      const window = usage.contextWindow;
-      const percent = usage.percent !== null ? `${usage.percent.toFixed(1)}%` : "?";
-      infoMsg += `\n📊 Contexte : ${tokens} / ${window} tokens (${percent})`;
-    }
-
-    if (lastActivePlatform === "discord") {
-      await sendDiscordReply(lastActiveChannelId, infoMsg);
-    } else if (lastActivePlatform === "whatsapp") {
-      await sendWhatsAppReply(lastActiveChannelId, infoMsg);
-    }
-
-    isFreshNewSession = false;
-    lastActivePlatform = null;
-    lastActiveChannelId = null;
+  /* ----  Model select — track current model for /new confirmation  ---- */
+  pi.on("model_select", async (event, _ctx) => {
+    currentModelInfo = {
+      name: event.model.name ?? "default",
+      provider: event.model.provider ?? "unknown",
+      contextWindow: event.model.context_window ?? 128000,
+    };
+    console.log(`[thetis-gateway] Model tracked: ${currentModelInfo.name} (${currentModelInfo.provider}), window=${currentModelInfo.contextWindow}`);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
