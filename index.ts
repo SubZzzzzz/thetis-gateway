@@ -2646,25 +2646,44 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
       
       // Send startup confirmation ONLY on actual service startup (not on /new)
       // event.reason is "startup" for service start, "new" for /new command
+      // Use a flag file to ensure message is sent only once across all gateways
       if (event.reason === "startup" || event.reason === "resume") {
-        const startupMsg = `✅ Gateway redémarré avec succès !`;
-        if (fs.existsSync(THREADS_DIR)) {
-          const threadFiles = fs.readdirSync(THREADS_DIR).filter(f => f.endsWith(".json"));
-          for (const file of threadFiles) {
-            try {
-              const threadId = file.replace(".json", "");
-              const threadData = JSON.parse(fs.readFileSync(path.join(THREADS_DIR, file), "utf8"));
-              // Extract platform and channelId from threadId (format: "platform:channelId")
-              const [threadPlatform, ...channelIdParts] = threadId.split(":");
-              const channelId = channelIdParts.join(":");
-              
-              if (threadPlatform === "discord") {
-                await sendDiscordReply(channelId, startupMsg);
-              } else if (threadPlatform === "whatsapp") {
-                await sendWhatsAppReply(channelId, startupMsg);
+        const flagFile = `/tmp/thetis-gateway-startup-flag`;
+        const now = Date.now();
+        let shouldSend = false;
+        
+        if (fs.existsSync(flagFile)) {
+          const flagTime = parseInt(fs.readFileSync(flagFile, "utf8"));
+          // If flag is older than 10 seconds, it's stale - send message
+          if (now - flagTime > 10000) {
+            shouldSend = true;
+          }
+        } else {
+          shouldSend = true;
+        }
+        
+        if (shouldSend) {
+          fs.writeFileSync(flagFile, String(now));
+          
+          const startupMsg = `✅ Gateway redémarré avec succès !`;
+          if (fs.existsSync(THREADS_DIR)) {
+            const threadFiles = fs.readdirSync(THREADS_DIR).filter(f => f.endsWith(".json"));
+            for (const file of threadFiles) {
+              try {
+                const threadId = file.replace(".json", "");
+                const threadData = JSON.parse(fs.readFileSync(path.join(THREADS_DIR, file), "utf8"));
+                // Extract platform and channelId from threadId (format: "platform:channelId")
+                const [threadPlatform, ...channelIdParts] = threadId.split(":");
+                const channelId = channelIdParts.join(":");
+                
+                if (threadPlatform === "discord") {
+                  await sendDiscordReply(channelId, startupMsg);
+                } else if (threadPlatform === "whatsapp") {
+                  await sendWhatsAppReply(channelId, startupMsg);
+                }
+              } catch (err) {
+                console.error(`[thetis-gateway] Failed to send startup message to thread ${file}:`, err);
               }
-            } catch (err) {
-              console.error(`[thetis-gateway] Failed to send startup message to thread ${file}:`, err);
             }
           }
         }
