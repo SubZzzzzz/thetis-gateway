@@ -1005,23 +1005,25 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
       if (message.attachments?.size > 0) {
         for (const [, att] of message.attachments) {
           if (att.contentType?.startsWith("image/")) {
-            // Discord peut servir des images en WebP — convertir en JPEG si nécessaire
-            if (att.contentType === "image/webp") {
-              try {
-                const sharp = require("sharp");
-                const response = await fetch(att.url);
-                if (response.ok) {
-                  const imgBuffer = Buffer.from(await response.arrayBuffer());
-                  const jpegBuffer = await sharp(imgBuffer).jpeg({ quality: 90 }).toBuffer();
-                  const b64 = jpegBuffer.toString("base64");
-                  attachments.push({ type: "image", source: { type: "base64", mediaType: "image/jpeg", data: b64 } });
-                } else {
-                  attachments.push({ type: "image", source: { type: "url", url: att.url } });
-                }
-              } catch {
+            // Toujours télécharger les images Discord et les convertir en JPEG base64.
+            // Les URLs CDN Discord ne sont pas accessibles depuis tous les providers IA,
+            // et certains formats (GIF, PNG animé, etc.) ne sont pas supportés.
+            try {
+              const sharp = require("sharp");
+              const response = await fetch(att.url);
+              if (response.ok) {
+                const imgBuffer = Buffer.from(await response.arrayBuffer());
+                const jpegBuffer = await sharp(imgBuffer).jpeg({ quality: 90 }).toBuffer();
+                const b64 = jpegBuffer.toString("base64");
+                attachments.push({ type: "image", source: { type: "base64", mediaType: "image/jpeg", data: b64 } });
+              } else {
+                console.error(`Failed to download Discord image: ${response.status} ${response.statusText}`);
+                // Fallback: URL directe (peut échouer côté provider)
                 attachments.push({ type: "image", source: { type: "url", url: att.url } });
               }
-            } else {
+            } catch (e) {
+              console.error(`Failed to convert Discord image: ${e}`);
+              // Fallback: URL directe
               attachments.push({ type: "image", source: { type: "url", url: att.url } });
             }
           } else if (att.size < 500_000 && isTextFile(att.name)) {
