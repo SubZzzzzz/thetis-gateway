@@ -2644,25 +2644,28 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
         if (isGatewayEnabled("whatsapp")) await startWhatsApp(pi, ctx);
       }
       
-      // Send startup confirmation to all known channels from existing threads
-      const startupMsg = `✅ Gateway redémarré avec succès !`;
-      if (fs.existsSync(THREADS_DIR)) {
-        const threadFiles = fs.readdirSync(THREADS_DIR).filter(f => f.endsWith(".json"));
-        for (const file of threadFiles) {
-          try {
-            const threadId = file.replace(".json", "");
-            const threadData = JSON.parse(fs.readFileSync(path.join(THREADS_DIR, file), "utf8"));
-            // Extract platform and channelId from threadId (format: "platform:channelId")
-            const [threadPlatform, ...channelIdParts] = threadId.split(":");
-            const channelId = channelIdParts.join(":");
-            
-            if (threadPlatform === "discord") {
-              await sendDiscordReply(channelId, startupMsg);
-            } else if (threadPlatform === "whatsapp") {
-              await sendWhatsAppReply(channelId, startupMsg);
+      // Send startup confirmation ONLY on actual service startup (not on /new)
+      // event.reason is "startup" for service start, "new" for /new command
+      if (event.reason === "startup" || event.reason === "resume") {
+        const startupMsg = `✅ Gateway redémarré avec succès !`;
+        if (fs.existsSync(THREADS_DIR)) {
+          const threadFiles = fs.readdirSync(THREADS_DIR).filter(f => f.endsWith(".json"));
+          for (const file of threadFiles) {
+            try {
+              const threadId = file.replace(".json", "");
+              const threadData = JSON.parse(fs.readFileSync(path.join(THREADS_DIR, file), "utf8"));
+              // Extract platform and channelId from threadId (format: "platform:channelId")
+              const [threadPlatform, ...channelIdParts] = threadId.split(":");
+              const channelId = channelIdParts.join(":");
+              
+              if (threadPlatform === "discord") {
+                await sendDiscordReply(channelId, startupMsg);
+              } else if (threadPlatform === "whatsapp") {
+                await sendWhatsAppReply(channelId, startupMsg);
+              }
+            } catch (err) {
+              console.error(`[thetis-gateway] Failed to send startup message to thread ${file}:`, err);
             }
-          } catch (err) {
-            console.error(`[thetis-gateway] Failed to send startup message to thread ${file}:`, err);
           }
         }
       }
