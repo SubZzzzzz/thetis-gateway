@@ -1050,16 +1050,16 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
                 const imgBuffer = Buffer.from(await response.arrayBuffer());
                 const jpegBuffer = await sharp(imgBuffer).jpeg({ quality: 90 }).toBuffer();
                 const b64 = jpegBuffer.toString("base64");
-                attachments.push({ type: "image", source: { type: "base64", mediaType: "image/jpeg", data: b64 } });
+                attachments.push({ type: "image", mimeType: "image/jpeg", data: b64 });
               } else {
                 console.error(`Failed to download Discord image: ${response.status} ${response.statusText}`);
                 // Fallback: URL directe (peut échouer côté provider)
-                attachments.push({ type: "image", source: { type: "url", url: att.url } });
+                attachments.push({ type: "image", mimeType: att.contentType || "image/jpeg", url: att.url });
               }
             } catch (e) {
               console.error(`Failed to convert Discord image: ${e}`);
               // Fallback: URL directe
-              attachments.push({ type: "image", source: { type: "url", url: att.url } });
+              attachments.push({ type: "image", mimeType: att.contentType || "image/jpeg", url: att.url });
             }
           } else if (att.size < 500_000 && isTextFile(att.name)) {
             try {
@@ -1645,7 +1645,7 @@ async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
                 finalMediaType = "image/jpeg";
               }
               const finalB64 = Buffer.from(finalBuffer).toString("base64");
-              attachments.push({ type: "image", source: { type: "base64", mediaType: finalMediaType, data: finalB64 } });
+              attachments.push({ type: "image", mimeType: finalMediaType, data: finalB64 });
             } else if (mediaType.startsWith("text/") || isTextFile(msg.message.documentMessage?.fileName || "")) {
               const content = buffer.toString("utf8");
               text += `\n\n--- File: ${msg.message.documentMessage?.fileName || "attachment"} ---\n\`\`\`\n${content.slice(0, 8000)}\n\`\`\``;
