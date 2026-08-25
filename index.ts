@@ -2067,7 +2067,7 @@ function counterKey(threadId: string, toolName: string): string {
 /*  Error Classification & Retry Logic                                 */
 /* ------------------------------------------------------------------ */
 
-type ErrorType = "rate_limit" | "payment_required" | "server_error" | "network_error" | "unknown";
+type ErrorType = "rate_limit" | "payment_required" | "client_error" | "server_error" | "network_error" | "unknown";
 
 /**
  * Classify an error from the raw error text returned by the API.
@@ -2132,6 +2132,24 @@ function classifyError(errorText: string): ErrorType {
     return "network_error";
   }
 
+  // Client errors (4xx) — specific patterns
+  if (
+    lower.includes("400") ||
+    lower.includes("invalid_parameter") ||
+    lower.includes("invalid_request") ||
+    lower.includes("bad request") ||
+    lower.includes("image format") ||
+    lower.includes("cannot be opened") ||
+    lower.includes("illegal")
+  ) {
+    return "client_error";
+  }
+
+  // Client errors (4xx) — generic fallback for any 4xx HTTP code
+  if (/\b4(?:0[0-9]|1[0-9]|2[0-2])\b/.test(errorText)) {
+    return "client_error";
+  }
+
   return "unknown";
 }
 
@@ -2147,6 +2165,7 @@ function getMaxRetriesForErrorType(errorType: ErrorType): number {
   switch (errorType) {
     case "rate_limit": return 0;
     case "payment_required": return 0;
+    case "client_error": return 0;
     case "server_error": return 2;
     case "network_error": return 3;
     case "unknown": return 1;
@@ -2164,6 +2183,8 @@ function getErrorMessageForErrorType(errorType: ErrorType): string {
       return "Crédits IA épuisés. Veuillez recharger votre compte.";
     case "server_error":
       return "Erreur serveur IA. Le service est temporairement indisponible.";
+    case "client_error":
+      return "❌ Le format du fichier envoyé n'est pas supporté. Veuillez essayer avec un autre format (JPG, PNG).";
     case "network_error":
       return "Erreur réseau. Vérifiez votre connexion.";
     case "unknown":
