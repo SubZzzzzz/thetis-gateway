@@ -209,9 +209,6 @@ Ces commandes fonctionnent depuis le terminal Pi **et** depuis Discord/WhatsApp.
 
 | Commande | Description | Gateway |
 |----------|-------------|---------|
-| `/gateway status` | État des connexions et threads | ✅ |
-| `/gateway threads` | Lister les conversations actives | ✅ |
-| `/gateway clear [id]` | Vider l'historique d'un canal | ✅ |
 | `/gateway qr` | (Re)lancer la connexion WhatsApp et afficher un QR code | ✅ |
 | `/gateway reset-whatsapp` | Supprimer les credentials WhatsApp et forcer un nouveau QR | ✅ |
 | `/gateway-boot start` | Démarrer les services systemd activés | ✅ |
@@ -298,8 +295,8 @@ Le QR code WhatsApp s'affiche comme un **widget au-dessus de l'éditeur** dans l
 ### Reconnexion automatique WhatsApp
 
 Si la connexion WhatsApp tombe (réseau instable, serveur temporairement indisponible) :
-- Le gateway retente **3 fois**, espacées de **5 secondes**
-- Au-delà, il passe en **erreur fatale** (visible avec `/gateway status` préfixé par ⛔)
+- Le gateway retente jusqu'à **50 fois** avec un **backoff exponentiel** (5s, 15s, 45s… jusqu'à 5 min max entre chaque tentative)
+- Au-delà, il passe en **erreur fatale** (visible avec `/gateway-boot status`)
 - Pour réessayer : redémarre le service avec `/gateway-boot stop` puis `/gateway-boot start`, ou utilise `/gateway qr`
 - En cas de **logged out** (session expirée ou déconnectée depuis le téléphone) : pas de retry automatique — utilisez `/gateway reset-whatsapp` pour effacer les credentials puis rescanner le QR (ou `/gateway qr` pour forcer un nouveau cycle de connexion si l'état d'auth est encore récupérable)
 
