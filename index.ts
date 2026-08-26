@@ -1263,6 +1263,12 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
 
 async function stopDiscord(ctx: ExtensionContext) {
   if (!discordClient) return;
+  // Clean up all Discord typing indicators before destroying the client
+  for (const [, thread] of threads) {
+    if (thread.platform === "discord" && (thread.typingActive || thread.typingInterval)) {
+      await stopThinkingIndicator(thread);
+    }
+  }
   try { await discordClient.destroy(); ctx.ui.notify("Discord disconnected", "info"); } catch {}
   discordClient = null;
 }
@@ -1854,18 +1860,30 @@ async function startThinkingIndicator(thread: ChannelThread) {
 
   // Discord: just typing indicator (no ephemeral message)
   if (thread.platform === "discord" && isDiscordReady()) {
+    console.log(`[thetis-gateway] Typing indicator started for Discord channel ${thread.channelId}`);
     const pulse = async () => {
-      if (!thread.typingActive) return;
+      if (!thread.typingActive) {
+        console.log(`[thetis-gateway] Typing pulse skipped — typingActive=false for ${thread.channelId}`);
+        return;
+      }
+      if (!discordClient) {
+        console.log(`[thetis-gateway] Typing pulse skipped — discordClient is null for ${thread.channelId}`);
+        return;
+      }
       try {
         const channel = await discordClient.channels.fetch(thread.channelId);
         if (channel && typeof channel.sendTyping === "function") {
           await channel.sendTyping();
-          // Schedule next pulse just before the 10s expiry to avoid overlap
+          console.log(`[thetis-gateway] Typing pulse sent for ${thread.channelId}`);
+          // Schedule next pulse at 8s (safe margin before Discord's 10s expiry)
           if (thread.typingActive) {
-            thread.typingInterval = setTimeout(pulse, 9000);
+            thread.typingInterval = setTimeout(pulse, 8000);
           }
+        } else {
+          console.warn(`[thetis-gateway] Typing pulse: channel missing or sendTyping unavailable for ${thread.channelId}`);
         }
-      } catch {
+      } catch (err) {
+        console.error(`[thetis-gateway] Typing pulse failed for ${thread.channelId}:`, err);
         // If sendTyping fails (e.g. rate limit), retry sooner
         if (thread.typingActive) {
           thread.typingInterval = setTimeout(pulse, 5000);
@@ -1885,11 +1903,15 @@ async function startThinkingIndicator(thread: ChannelThread) {
 }
 
 async function stopThinkingIndicator(thread: ChannelThread) {
-  // Stop typing indicator
+  const wasActive = thread.typingActive === true;
+  // Stop typing indicator (idempotent — safe to call multiple times)
   thread.typingActive = false;
   if (thread.typingInterval) {
     clearTimeout(thread.typingInterval);
     thread.typingInterval = undefined;
+  }
+  if (wasActive) {
+    console.log(`[thetis-gateway] Typing indicator stopped for ${thread.platform} channel ${thread.channelId}`);
   }
 
   // WhatsApp: delete the ephemeral "💭 Réflexion..." message
@@ -2395,13 +2417,8 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
 
   /* ----  Count tool usage for gateway notifications  ---- */
   pi.on("tool_execution_start", async (event) => {
-    // Relancer le typing indicator sur Discord pendant l'exécution des outils
-    if (currentThreadId) {
-      const thread = threads.get(currentThreadId);
-      if (thread?.platform === "discord") {
-        await startThinkingIndicator(thread);
-      }
-    }
+    // Note: typing indicator is NOT restarted here — it stays active for the entire agent run
+    // from startThinkingIndicator (called when the user message is received) until agent_end.
 
     if ((event.toolName === "memory" || event.toolName === "learn_wizard") && currentThreadId) {
       const key = counterKey(currentThreadId, event.toolName);
@@ -2432,10 +2449,8 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
 
   pi.on("turn_end", async () => {
     toolCounters.clear();
-    if (currentThreadId) {
-      const thread = threads.get(currentThreadId);
-      if (thread) await stopThinkingIndicator(thread);
-    }
+    // Note: typing indicator is NOT stopped here — it stays active for the entire agent run.
+    // It is only stopped on agent_end (full completion of the agent, including all turns).
   });
 
   /* ----  Track pi's internal retry state (System A)  ---- */
@@ -2718,6 +2733,12 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    // Stop all typing indicators before shutting down clients
+    for (const [, thread] of threads) {
+      if (thread.typingActive || thread.typingInterval) {
+        await stopThinkingIndicator(thread);
+      }
+    }
     await stopDiscord(ctx);
     await stopWhatsApp(ctx);
     activeCtx = null;
