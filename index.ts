@@ -1112,9 +1112,6 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
           name: "gateway",
           description: "Contrôle le gateway Discord/WhatsApp",
           options: [
-            { name: "status", type: 1, description: "État des connexions" },
-            { name: "threads", type: 1, description: "Lister les conversations actives" },
-            { name: "clear", type: 1, description: "Vider l’historique d’un canal", options: [{ name: "id", type: 3, description: "ID du canal (laisser vide pour tout vider)", required: false }] },
             { name: "qr", type: 1, description: "(Re)lancer la connexion WhatsApp et afficher un QR code" },
             { name: "reset-whatsapp", type: 1, description: "Supprimer les credentials WhatsApp et forcer un nouveau QR" },
             { name: "setup", type: 1, description: "Configurer le gateway (requiert le TUI)" },
@@ -1155,13 +1152,7 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
         // Acknowledge immediately to avoid timeout
         await interaction.deferReply?.({ ephemeral: false }).catch(() => null);
 
-        let args = sub;
-        if (commandName === "gateway") {
-          const target = interaction.options?.getString?.("target") ?? "";
-          const id = interaction.options?.getString?.("id") ?? "";
-          if (target) args += ` ${target}`;
-          if (id) args += ` ${id}`;
-        }
+        const args = sub;
 
         let result: CommandResult | null = null;
         if (commandName === "gateway") {
@@ -2006,49 +1997,6 @@ async function runGatewayCommand(
     };
   }
 
-  if (sub === "status") {
-    const d = isDiscordReady()
-      ? "🟢 connected"
-      : runtimeState.discord.fatalError
-      ? `⛔ ${runtimeState.discord.fatalError}`
-      : !isGatewayEnabled("discord")
-      ? "⚪ disabled"
-      : "🔴 offline";
-    const w = isWhatsAppReady()
-      ? "🟢 connected"
-      : runtimeState.whatsapp.fatalError
-      ? `⛔ ${runtimeState.whatsapp.fatalError}`
-      : !isGatewayEnabled("whatsapp")
-      ? "⚪ disabled"
-      : "🔴 offline";
-    return { text: `Discord: ${d}\nWhatsApp: ${w}\nActive threads: ${threads.size}` };
-  }
-
-  if (sub === "threads") {
-    if (threads.size === 0) return { text: "No active threads." };
-    const lines = Array.from(threads.entries()).map(([id, t]) => {
-      return `- ${id}: ${t.messages.length} msgs, ${t.pendingQueue.length} pending`;
-    });
-    return { text: lines.join("\n") };
-  }
-
-  if (sub === "clear") {
-    const target = parts[1];
-    if (target) {
-      const id = getThreadId("discord", target) in [...threads.keys()]
-        ? getThreadId("discord", target)
-        : getThreadId("whatsapp", target);
-      threads.delete(id);
-      const file = path.join(THREADS_DIR, `${id}.json`);
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-      return { text: `Thread ${target} cleared.` };
-    } else {
-      threads.clear();
-      clearAllThreadHistories();
-      return { text: "All threads cleared." };
-    }
-  }
-
   if (sub === "setup") {
     if (!gCtx.hasUI) {
       return {
@@ -2151,9 +2099,10 @@ async function runGatewayCommand(
   // Unknown sub-command — return help
   return {
     text:
-      `Usage: /gateway qr|reset-whatsapp|status|threads|clear|setup [options]\n` +
+      `Usage: /gateway qr|reset-whatsapp|setup\n` +
       `  qr              : (re)lance la connexion WhatsApp (affiche un QR si pas de creds)\n` +
-      `  reset-whatsapp  : supprime les creds WhatsApp et force un nouveau QR`,
+      `  reset-whatsapp  : supprime les creds WhatsApp et force un nouveau QR\n` +
+      `  setup           : configure le gateway (requiert le TUI)`,
     error: true,
   };
 }
@@ -2692,7 +2641,7 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
     }
 
     // Auto-start gateways only when Pi runs as a service (RPC mode).
-    // In TUI mode the user must start them manually with /gateway start.
+    // In TUI mode the user must start them manually with /gateway-boot start.
     // GATEWAY_PLATFORM env var restricts which gateway to start (set by systemd services).
     if (config.autoStart && ctx.mode === "rpc") {
       const platform = process.env.GATEWAY_PLATFORM;
