@@ -228,6 +228,7 @@ interface ChannelThread {
   processing: boolean;
   pendingMessageId?: string;
   typingInterval?: NodeJS.Timeout;
+  typingActive?: boolean; // Flag to control typing indicator pulse
   retryCount?: number;
   maxRetries?: number;
   lastUserMessage?: { text: string; images?: any[] };
@@ -968,6 +969,12 @@ async function startDiscord(pi: ExtensionAPI, ctx: ExtensionContext) {
     return;
   }
 
+  // Prevent multiple Discord clients from being created
+  if (discordClient) {
+    console.log(`[thetis-gateway] Discord already connected, skipping startDiscord`);
+    return;
+  }
+
   if (runtimeState.discord.fatalError) {
     ctx.ui.notify(`Discord gateway has a fatal error and will not retry: ${runtimeState.discord.fatalError}`, "warning");
     return;
@@ -1385,6 +1392,12 @@ async function deleteWhatsAppMessage(jid: string, messageId: string): Promise<vo
 async function startWhatsApp(pi: ExtensionAPI, ctx: ExtensionContext) {
   if (!isGatewayEnabled("whatsapp")) {
     ctx.ui.notify("WhatsApp gateway is disabled in config. Run /gateway setup to enable it.", "warning");
+    return;
+  }
+
+  // Prevent multiple WhatsApp clients from being created
+  if (whatsappSock) {
+    console.log(`[thetis-gateway] WhatsApp already connected, skipping startWhatsApp`);
     return;
   }
 
@@ -1846,22 +1859,24 @@ async function routeAssistantReply(pi: ExtensionAPI, text: string, attachments?:
 
 async function startThinkingIndicator(thread: ChannelThread) {
   await stopThinkingIndicator(thread);
+  thread.typingActive = true;
 
   // Discord: just typing indicator (no ephemeral message)
   if (thread.platform === "discord" && isDiscordReady()) {
     const pulse = async () => {
+      if (!thread.typingActive) return;
       try {
         const channel = await discordClient.channels.fetch(thread.channelId);
         if (channel && typeof channel.sendTyping === "function") {
           await channel.sendTyping();
           // Schedule next pulse just before the 10s expiry to avoid overlap
-          if (thread.typingInterval) {
+          if (thread.typingActive) {
             thread.typingInterval = setTimeout(pulse, 9000);
           }
         }
       } catch {
         // If sendTyping fails (e.g. rate limit), retry sooner
-        if (thread.typingInterval) {
+        if (thread.typingActive) {
           thread.typingInterval = setTimeout(pulse, 5000);
         }
       }
@@ -1879,9 +1894,10 @@ async function startThinkingIndicator(thread: ChannelThread) {
 }
 
 async function stopThinkingIndicator(thread: ChannelThread) {
-  // Clear typing interval
+  // Stop typing indicator
+  thread.typingActive = false;
   if (thread.typingInterval) {
-    clearInterval(thread.typingInterval);
+    clearTimeout(thread.typingInterval);
     thread.typingInterval = undefined;
   }
 
@@ -2484,6 +2500,10 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
     if (!currentThreadId) return;
     const thread = threads.get(currentThreadId);
     if (!thread) return;
+    
+    // Always stop typing indicator when agent ends
+    await stopThinkingIndicator(thread);
+    
     if ((event as any).willRetry === false) {
       thread.piExhaustedRetries = true;
       console.log(`[thetis-gateway] Pi agent run ended — willRetry=false (System A exhausted)`);
@@ -2654,6 +2674,11 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
 
     // Clean up stale uploaded files on session start
     cleanupFilesDir();
+
+    // Stop all typing indicators on session start (e.g., after /new)
+    for (const [, thread] of threads) {
+      await stopThinkingIndicator(thread);
+    }
 
     // Capture current model info at session start
     // This ensures we have the model info for /new confirmation messages
