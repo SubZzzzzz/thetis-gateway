@@ -823,6 +823,30 @@ async function handlePiCommand(
       return { handled: true };
     }
 
+    // For /stop, interrupt the current agent operation
+    if (cmd === "stop") {
+      // Abort the current agent operation (same as double Escape in TUI)
+      if (activeCtx) {
+        try {
+          activeCtx.abort();
+          console.log(`[thetis-gateway] Agent abort called via /stop command`);
+        } catch (err) {
+          console.error(`[thetis-gateway] Failed to abort agent:`, err);
+        }
+      }
+      
+      // Clean up thread state (cancel retries, clear queue, etc.)
+      await handleStopKeyword(thread, pi);
+      
+      // Stop the thinking indicator
+      await stopThinkingIndicator(thread);
+      
+      // Override the default confirmation message
+      await replyToThread(thread, "✅ Opération interrompue.");
+      
+      return { handled: true };
+    }
+
     // For other silent commands, send confirmation and DO NOT send to LLM
     // This saves tokens by not wasting them on command text
     const confirmations: Record<string, string> = {
@@ -1722,6 +1746,16 @@ async function handleStopKeyword(
   thread: ChannelThread,
   pi: ExtensionAPI
 ): Promise<boolean> {
+  // Interrupt the current agent operation (same as double Escape in TUI)
+  if (activeCtx) {
+    try {
+      activeCtx.abort();
+      console.log(`[thetis-gateway] Agent abort called via stop keyword`);
+    } catch (err) {
+      console.error(`[thetis-gateway] Failed to abort agent:`, err);
+    }
+  }
+
   // Cancel any pending retry timer
   if (thread.retryTimer) {
     clearTimeout(thread.retryTimer);
@@ -1739,10 +1773,13 @@ async function handleStopKeyword(
   thread.pendingQueue.length = 0;
   thread.processing = false;
 
+  // Stop the thinking indicator
+  await stopThinkingIndicator(thread);
+
   // Send confirmation
   await replyToThread(thread, "✅ Opération annulée.");
 
-  console.log(`[thetis-gateway] Stop keyword received — retries cancelled, context cleaned`);
+  console.log(`[thetis-gateway] Stop keyword received — agent aborted, retries cancelled, context cleaned`);
   return true;
 }
 
@@ -2635,6 +2672,23 @@ export default function thetisGatewayExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (event, ctx) => {
     activeCtx = ctx;
     resetGatewayRuntimeState();
+
+    // Save the active session file path for persistence across gateway restarts
+    const sessionFile = ctx.sessionManager.getSessionFile();
+    if (sessionFile) {
+      const platform = process.env.GATEWAY_PLATFORM || "default";
+      const sessionInfoFile = path.join(DATA_DIR, `active-session-${platform}.json`);
+      try {
+        fs.writeFileSync(sessionInfoFile, JSON.stringify({
+          sessionFile,
+          timestamp: Date.now(),
+          reason: event.reason
+        }));
+        console.log(`[thetis-gateway] Saved active session: ${sessionFile}`);
+      } catch (err) {
+        console.error(`[thetis-gateway] Failed to save session info:`, err);
+      }
+    }
 
     // Clean up stale uploaded files on session start
     cleanupFilesDir();

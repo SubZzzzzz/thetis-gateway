@@ -32,6 +32,9 @@ fi
 PIPE_FILE="/tmp/thetis-gateway-pipe-${PLATFORM:-default}"
 CMD_FILE="/tmp/thetis-gateway-cmd-${PLATFORM:-default}"
 
+# Session persistence file (extension saves session path here)
+SESSION_INFO_FILE="$HOME/.pi/agent/extensions-data/thetis-gateway/active-session-${PLATFORM:-default}.json"
+
 # Clean up old files
 rm -f "$PIPE_FILE" "$CMD_FILE"
 touch "$CMD_FILE"
@@ -53,5 +56,16 @@ exec 3<>"$PIPE_FILE"
   done
 ) &
 
+# Check if we have a saved session to resume
+SESSION_ARG=""
+if [ -f "$SESSION_INFO_FILE" ]; then
+  # Extract sessionFile from JSON (simple grep/sed, no jq dependency)
+  SAVED_SESSION=$(grep -o '"sessionFile":"[^"]*"' "$SESSION_INFO_FILE" 2>/dev/null | sed 's/"sessionFile":"//;s/"$//' || true)
+  if [ -n "$SAVED_SESSION" ] && [ -f "$SAVED_SESSION" ]; then
+    SESSION_ARG="--session $SAVED_SESSION"
+    echo "[thetis-gateway] Resuming session: $SAVED_SESSION" >&2
+  fi
+fi
+
 # Run pi in RPC mode reading from the pipe
-exec pi --mode rpc --name "$SESSION_NAME" <&3
+exec pi --mode rpc --name "$SESSION_NAME" $SESSION_ARG <&3
